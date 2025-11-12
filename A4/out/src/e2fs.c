@@ -61,6 +61,7 @@ static struct ex2_dir_wrapper* e2_return_success(struct ext2_dir_entry* entry, i
 
 /**
  * This function searches the inode bitmap and returns the index of the first free non-reserved entry.
+ * Not finished TODO
  */
 static int ex2_search_inode_bitmap() {
     // get the inode bitmap from the group descriptor
