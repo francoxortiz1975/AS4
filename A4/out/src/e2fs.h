@@ -24,6 +24,10 @@
 
 // .....
 int32_t e2_path_walk_absolute(char* path);
+struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name);
+struct ext2_inode* resolve_inode_number(unsigned int inodeno);
+struct int ex2_search_free_block_bitmap();
+
 
 // Structs for helper functions
 struct ex2_dir_wrapper {
