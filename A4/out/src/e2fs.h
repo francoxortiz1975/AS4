@@ -23,10 +23,12 @@
  */
 
 // .....
-struct ex2_dir_wrapper* e2_path_walk_absolute(char* path);
-struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name);
+struct ex2_dir_wrapper e2_path_walk_absolute(const char* path);
+struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name, int blocks_needed);
 struct ext2_inode* resolve_inode_number(unsigned int inodeno);
-struct int ex2_search_free_block_bitmap();
+struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char* name, unsigned int inode);
+void ex2_free_dir_entry(struct ext2_dir_entry* entry);
+int ex2_search_free_block_bitmap();
 
 
 // Structs for helper functions
@@ -37,6 +39,9 @@ struct ex2_dir_wrapper {
     // 0 if success
     // 1 if last item doesn't exist but items before do (entry thus has the parent inode)
     int errcode;
+    // Pointer to the last token. Not allocated with malloc, uses the input path
+    // May have a trailing slash
+    char* last_token;
 };
 
 #endif

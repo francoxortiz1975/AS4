@@ -13,6 +13,12 @@
 
 #include "ext2fsal.h"
 #include "e2fs.h"
+// i assume this is fine?
+#include <stdio.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <stdlib.h>
+
 
 
 // Define essential/commonly used global variables
@@ -22,7 +28,7 @@ unsigned char *disk;
 struct ext2_super_block *sb;
 struct ext2_group_desc* gd;
 // The inode table
-char* inode_table;
+unsigned char* inode_table;
 // The root directory inode, since it's used on every path walk
 struct ext2_inode* root_inode;
 

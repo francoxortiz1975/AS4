@@ -27,45 +27,41 @@
 extern unsigned char* disk; 
 extern struct ext2_super_block *sb;
 extern struct ext2_group_desc* gd;
-extern char* inode_table;
+extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
 
 
+static const int DIR_ENTRY_MIN_SIZE = 8;
+
+
 /**
- * This function is a shortcut for functions that return ext2_dir_wrapper pointers.
- * It is used when there is an error.
+ * This helper function returns the number of free blocks on the drive.
  */
-static struct ex2_dir_wrapper* e2_return_error_code(int error) {
-    struct ex2_dir_wrapper* errorval = calloc(1, sizeof(struct ext2_dir_wrapper));
-    if (errorval == NULL) {
-        // Out of memory
-        exit(1);
+static int ex2_find_free_blocks_count() {
+    unsigned char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
+    int free_blocks = 0;
+    for (int i = 0; i < sb->s_inodes_count / 8; i++) {
+        char block_byte = *(block_bitmap + i);
+        // Check each bit
+        for (char j = 0; j < 8; j++) {
+            char mask = 1 << j;
+
+            // if it's free
+            if ((mask & block_byte) == 0) {
+                free_blocks++;
+            }
+        }
     }
-    errorval->errcode = error;
-    return errorval;
-} 
-/**
- * This function is a shortcut for functions that return ext2_dir_wrapper pointers.
- * It is used when there is a success
- */
-static struct ex2_dir_wrapper* e2_return_success(struct ext2_dir_entry* entry, int code) {
-    struct ex2_dir_wrapper* successval = calloc(1, sizeof(struct ext2_dir_wrapper));
-    if (successval == NULL) {
-        // Out of memory
-        exit(1);
-    }
-    successval->entry = entry;
-    successval->errcode = code;
-    return successval;
+    return free_blocks;
 }
 
 /**
  * This function searches the block bitmap and returns the index of the first free non-reserved entry.
  * It also marks the bitmap entry as claimed.
- * If none is found, returns NULL.
+ * If none is found, returns -1.
  */
-struct int ex2_search_free_block_bitmap() {
-    char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
+int ex2_search_free_block_bitmap() {
+    unsigned char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
 
     // Check each byte
     for (int i = 0; i < sb->s_inodes_count / 8; i++) {
@@ -76,12 +72,12 @@ struct int ex2_search_free_block_bitmap() {
             char mask = 1 << j;
 
             // if it's free
-            if ((mask & inode_byte) == 0) {
-                *(inode_bitmap + i) |= mask;
+            if ((mask & block_byte) == 0) {
+                *(block_bitmap + i) |= mask;
 
                 // increment the superblock and gd counts
                 sb->s_blocks_count++;
-                sb->free_blocks_count--;
+                sb->s_free_blocks_count--;
 
                 gd->bg_free_blocks_count--;
 
@@ -91,7 +87,7 @@ struct int ex2_search_free_block_bitmap() {
             }
         }
     }
-    // Nothing found, return NULL
+    // Nothing found, return -1
     return -1;
 }
 
@@ -103,8 +99,7 @@ struct int ex2_search_free_block_bitmap() {
  */
 static int ex2_search_free_inode_bitmap() {
     // Get the inode bitmap, table from the group descriptor
-    char* inode_bitmap = (disk + (1024 * gd->bg_inode_bitmap));
-    char* inode_table = (disk + (1024 * gd->bg_inode_table));
+    unsigned char* inode_bitmap = (disk + (1024 * gd->bg_inode_bitmap));
 
     // Check each byte
     for (int i = 0; i < sb->s_inodes_count / 8; i++) {
@@ -134,21 +129,49 @@ static int ex2_search_free_inode_bitmap() {
     return -1;
 }
 
+
+static void ex2_unmark_inode_bitmap(int index) {
+    // Get the inode bitmap, table from the group descriptor
+    unsigned char* inode_bitmap = (disk + (1024 * gd->bg_inode_bitmap));
+
+    // Go directly to the index byte
+    unsigned char* inode_byte = (inode_bitmap + (index / 8));
+
+    char bit = 1 << (index % 8);
+    // Unclaim the bit
+    *inode_byte &= ~bit;
+
+    // Decrement the superblock and gd counts
+    sb->s_inodes_count--;
+    sb->s_free_inodes_count++;
+    gd->bg_free_inodes_count++;
+}
+
+/**
+ * This function aligns to 4 bytes
+ */
+static int align_4_bytes(int num) {
+    if (num % 4 == 0) return num;
+    else return num + 4 - (num % 4);
+}
+
 /**
  * This helper function searches and allocates a free directory entry in a directory inode
  */
-static struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, unsigned int name_length, unsigned int inode) {
- 
-    // TODO check that this is correct
-    unsigned short base_entry_size = 
-        sizeof(unsigned int) + 
-        sizeof(unsigned short) + 
-        sizeof(unsigned char) * 2;
-
-    // find the size of the new entry
-    int new_entry_size = base_entry_size + sizeof(char) * name_length;
+struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char* name, unsigned int inode) {
 
     int size_acc = 0;
+    
+    // If initializing with "."
+    if (folder->i_size == 0) {
+        struct ext2_dir_entry* new_entry = (struct ext2_dir_entry*)(disk + (1024 * folder->i_block[0]));
+        new_entry->inode = inode;
+        new_entry->rec_len = EXT2_BLOCK_SIZE;
+        new_entry->name_len = strlen(name);
+        strcpy(new_entry->name, name);
+        new_entry->file_type = 0; // Temp init
+        return new_entry;
+    }
     // We use the assumption that there will only be direct blocks for directories
     // Thus, only 12 blocks
     for (int i = 0; i < 12; i++) {
@@ -157,52 +180,59 @@ static struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folde
 
         struct ext2_dir_entry* entry = (struct ext2_dir_entry*)(disk + (1024 * block_num));
         // Loop through the block
-        while (((char*)entry - (char*)disk) % 1024) {
-            // check if the entry is empty
-
+        do {
             // If size_acc >= folder->i_size
             if (size_acc >= folder->i_size) {
                 struct ext2_dir_entry* new_entry;
                 
+                int new_entry_actual_size = DIR_ENTRY_MIN_SIZE + align_4_bytes(strlen(name));
+                int last_entry_actual_size = DIR_ENTRY_MIN_SIZE + align_4_bytes(entry->name_len);
                 // Check if there's enough space for the new directory entry to go in the current block
-                if ((char*)entry + base_entry_size + entry->name_len > new_entry_size) {
+                if (entry->rec_len - last_entry_actual_size >= new_entry_actual_size) {
                     char* next_block_boundary = (char*)entry + entry->rec_len;
-                    entry->rec_len = base_entry_size + entry->name_len;
+                    entry->rec_len = last_entry_actual_size;
                     new_entry = (struct ext2_dir_entry *)((char*)entry + entry->rec_len);
                     new_entry->rec_len = next_block_boundary - (char*)new_entry;
-
                 } else {
                     // You have to allocate a new block first.
-                    // TODO finish this by calling the helper function
                     int new_block = ex2_search_free_block_bitmap();
 
                     // TODO check to see if this is enough for error handling/propagation
                     if (new_block == -1) return NULL;
-
-                    // If non-null, edit inode to add pointer
 
                     // Edit inode data
                     folder->i_block[i+1] = new_block;
                     folder->i_blocks += 2;
 
                     // Declare new entry
-                    new_entry = disk + blockno * EXT2_BLOCK_SIZE;
-                    new_entry->rec_len = (char*)new_entry + EXT2_BLOCK_SIZE;
+                    new_entry = (struct ext2_dir_entry *)(disk + block_num * EXT2_BLOCK_SIZE);
+                    new_entry->rec_len = EXT2_BLOCK_SIZE;
+
+                    folder->i_size += EXT2_BLOCK_SIZE;
                 }
+
                 new_entry->inode = inode;
-                new_entry->name_len = name_length;
-                new_entry->name = NULL; // Init to blank at first
+                new_entry->name_len = strlen(name);
+                strcpy(new_entry->name, name);
                 new_entry->file_type = 0; // Init to 0 at first
+
                 return new_entry;
             } 
-    
 
             size_acc += entry->rec_len;
             entry = (struct ext2_dir_entry *)((char*)entry + entry->rec_len);
-        }
+        } 
+        while (((char*)entry - (char*)disk) % 1024);
     }
-    fprintf("ex2_search_free_dir_entry: Looped through all 12 direct pointers, should not happen\n");
+    fprintf(stderr, "ex2_search_free_dir_entry: Looped through all 12 direct pointers, should not happen\n");
     return NULL;
+}
+
+/**
+ * This function frees a given directory entry.
+ */
+void ex2_free_dir_entry(struct ext2_dir_entry* entry) {
+    entry->inode = 0;
 }
 
 /**
@@ -210,6 +240,7 @@ static struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folde
  * it into a pointer to an ext2_inode.
  */
 struct ext2_inode* resolve_inode_number(unsigned int inodeno) {
+    unsigned char* inode_table = (disk + (1024 * gd->bg_inode_table));
     return (struct ext2_inode*)(inode_table + sizeof(struct ext2_inode) * inodeno);
 }
 
@@ -217,15 +248,15 @@ struct ext2_inode* resolve_inode_number(unsigned int inodeno) {
  * This function attempts to find a directory entry given a current directory inode
  * and a name. If successful, it will return the entry. If not, it will return NULL.
  */
-struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* name, int name_length) {
+static struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* name, int name_length) {
     if (directory->i_mode >> 12 != EXT2_S_IFDIR >> 12) {
-        fprintf("e2_find_dir_entry: This was not called with a directory inode!\n");
+        fprintf(stderr, "e2_find_dir_entry: This was not called with a directory inode!\n");
         exit(1);
     }
     // From the inode, get the direct blocks
     // We can assume that directories only have direct blocks
     for (int i = 0; i < 12; i++) {
-        int block_num = directory-i_block[i];
+        int block_num = directory->i_block[i];
         // Since blocks gives us double the actual count
         if (i + 1 > directory->i_blocks / 2) break;
 
@@ -236,7 +267,7 @@ struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* nam
             // If the name matches
             if (
                 name_length == entry->name_len &&
-                strncmp(name, entry->name, name_len) == 0
+                strncmp(name, entry->name, name_length) == 0
             ) {
                 return entry;
             }
@@ -254,29 +285,30 @@ struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* nam
 
 /**
  * This function implements a path-walk, given an absolute path string.
- * It returns an ex2_dir_wrapper pointer, a struct containing:
+ * It returns an ex2_dir_wrapper, a struct containing:
  * - a pointer to a directory entry (file, symlink, or directory) which is NULL on failure
  *   It can also be NULL if errcode returns 1 and the path is from the root dir, like with "/1"
  * - an error code which is 0 on success, 1 if the last item does not exist, and an errno value on error. 
  *   If errcode is 0, the pointer points to the file entry itself. If errcode is 1, it points to the parent directory entry 
  *   (which can be NULL if parent is root)
- * It is allocated via the heap, so it must be free'd after it is done being used!
  * Possible errors:
  * - EFAULT if the path is not absolute
  * - EINVAL if there is a path with 0 length item like "/1//3"
  * - ENOENT if there is an item that doesn't exist
  */
-struct ex2_dir_wrapper* e2_path_walk_absolute(char* path) {
+struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
+    struct ex2_dir_wrapper wrap;
     // Check that the first character of the string is / (so it's properly absolute)
-    if (path[0] != '/') return e2_return_error_code(-EFAULT);
+    if (path[0] != '/') {
+        wrap.errcode = -EFAULT;
+        return wrap;
+    }
 
     // Since it does start with /, start with inode 2 (the / directory)
 
-    int len_string = strlen(path);
-
 
     // Start at the first directory number
-    char* previous_slash = path;
+    char* previous_slash = (char*)path;
     char* next_slash = strchr(previous_slash + 1, '/');
     struct ext2_inode* current_dir_inode = root_inode;
     struct ext2_dir_entry* current_dir_entry = NULL;
@@ -285,12 +317,18 @@ struct ex2_dir_wrapper* e2_path_walk_absolute(char* path) {
     while (next_slash != NULL) {
         // Evaluate the current "token"
         int token_length = next_slash - previous_slash - 1;
-        if (token_length == 0) return e2_return_error_code(-EINVAL);
+        if (token_length == 0) {
+            wrap.errcode = -EINVAL;
+            return wrap;
+        }
 
         // call e2_find_dir_entry
         current_dir_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, token_length);
         // Check that the entry exists
-        if (current_dir_entry == NULL) return e2_return_error_code(-ENOENT);
+        if (current_dir_entry == NULL) {
+            wrap.errcode = -ENOENT;
+            return wrap;
+        }
 
         current_dir_inode = resolve_inode_number(current_dir_entry->inode);
         
@@ -315,7 +353,10 @@ struct ex2_dir_wrapper* e2_path_walk_absolute(char* path) {
 
         // In our assumptions, it states that a path will not include symlinks in the middle.
         // Check that it's the correct file type (directory)
-        if (file_type != 'd') return e2_return_error_code(-ENOENT);
+        if (file_type != 'd') {
+            wrap.errcode = -ENOENT;
+            return wrap;
+        }
 
         // Continue the loop
         previous_slash = next_slash;
@@ -332,10 +373,18 @@ struct ex2_dir_wrapper* e2_path_walk_absolute(char* path) {
         // Try to return the item if found.
         struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, len_last_string);
 
-        if (found_entry != NULL)
-            return e2_return_success(found_entry, 0);
-        else
-            return e2_return_success(current_dir_entry, 1);
+        if (found_entry != NULL) {
+            wrap.entry = found_entry;
+            wrap.errcode = 0;
+            wrap.last_token = previous_slash + 1;
+            return wrap;
+        }
+        else {
+            wrap.entry = current_dir_entry;
+            wrap.errcode = 1;
+            wrap.last_token = previous_slash + 1;
+            return wrap;
+        }
     } 
     // If we have a path like /1/2/3/, return the directory if it is one
     else {
@@ -343,9 +392,16 @@ struct ex2_dir_wrapper* e2_path_walk_absolute(char* path) {
         struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, len_last_string - 1);
 
         if (found_entry != NULL && found_entry->file_type == 2) {
-            return e2_return_success(found_entry, 0);
+            wrap.entry = found_entry;
+            wrap.errcode = 0;
+            wrap.last_token = previous_slash + 1;
+            return wrap;
         } else {
-            return e2_return_error_code(-ENOENT);
+            // This depends on the function but it's safer to return success and let them deal with it
+            wrap.entry = found_entry;
+            wrap.errcode = 1;
+            wrap.last_token = previous_slash + 1;
+            return wrap;
         }
     }
 }
@@ -355,13 +411,14 @@ struct ex2_dir_wrapper* e2_path_walk_absolute(char* path) {
  * Returns the directory entry on success. 
  * Returns NULL on failure (if there is no space left).
  */
-struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name) {
+struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name, int blocks_needed) {
     // Find/allocate a new inode for the file
     int inodeno = ex2_search_free_inode_bitmap();
     if (inodeno == -1) return NULL;
     
-    struct ext2_inode* new_inode = (struct ext2_inode*)(inode_table + sizeof(struct ext2_inode) * inodeno);
-    
+    struct ext2_inode* new_inode = resolve_inode_number(inodeno);
+    struct ext2_inode* parent_inode = resolve_inode_number(parent->inode);
+
     // Initialize the inode (partially)
 
     // Temporarily initialize i_mode, i_size, i_dtime
@@ -389,16 +446,28 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
 
     // Do NOT allocate data block(s) yet
 
-
     // update the parent directory with the extra directory entry
     // by going to the last spot in the linked list
-    struct ext2_dir_entry* new_entry = ex2_search_free_dir_entry(parent, strlen(name), inodeno);
+    struct ext2_dir_entry* new_dir_entry = ex2_search_free_dir_entry(parent_inode, name, inodeno);
+    // If there is no space for the new entry (if in a new block), undo inode mapping and return.
+    if (new_dir_entry == NULL) {
+        ex2_unmark_inode_bitmap(inodeno);
+        return NULL;
+    }
 
-    // set the name of the entry
-    strcpy(new_entry->name, name);
+
+    // Check that there are enough free blocks in the system
+    int free_blocks = ex2_find_free_blocks_count();
+
+    // If there is no space left, undo the new inode mapping and dir entry and return
+    if (free_blocks < blocks_needed) {
+        ex2_unmark_inode_bitmap(inodeno);
+        ex2_free_dir_entry(new_dir_entry);
+        return NULL;
+    }
 
     // superblock/group descriptors have been updated in helpers, so no work necessary here
-    return new_entry;
+    return new_dir_entry;
 
 }
 

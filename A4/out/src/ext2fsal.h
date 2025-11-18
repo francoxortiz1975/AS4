@@ -20,7 +20,7 @@
 extern unsigned char* disk; 
 extern struct ext2_super_block *sb;
 extern struct ext2_group_desc* gd;
-extern char* inode_table;
+extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
 
 
