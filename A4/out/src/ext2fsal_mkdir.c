@@ -19,6 +19,9 @@
 #include <string.h>
 #include <errno.h>
 
+extern struct ext2_inode* root_inode;
+
+
 
 int32_t ext2_fsal_mkdir(const char *path)
 {
@@ -33,6 +36,7 @@ int32_t ext2_fsal_mkdir(const char *path)
 
     // Take the path, path walk through it.
     struct ex2_dir_wrapper path_return = e2_path_walk_absolute(path);
+    unsigned int inodenum;
     // Make sure to free the dir_wrapper after use!
     if (path_return.errcode < 0) {
         return -EEXIST;
@@ -50,8 +54,16 @@ int32_t ext2_fsal_mkdir(const char *path)
         }
 
     } 
-    // The entry is the parent inode
-    struct ext2_inode* parentinode = resolve_inode_number(path_return.entry->inode);
+    struct ext2_inode* parentinode;
+    if (path_return.entry == NULL) {
+        parentinode = root_inode;
+        inodenum = 1;
+    } else {
+        inodenum = path_return.entry->inode - 1;
+        // The entry is the parent inode
+        parentinode = resolve_inode_number(inodenum);
+
+    }
 
 
     // get the name of the new inode, removing trailing slashes
@@ -66,36 +78,49 @@ int32_t ext2_fsal_mkdir(const char *path)
 
     // Create a file with the helper function
     struct ext2_dir_entry* newfile = e2_create_file_setup(path_return.entry, name, 1);
+    free(name);
     if (newfile == NULL) {
         
         return -ENOSPC;
     }
+    newfile->file_type = EXT2_FT_DIR;
 
-    struct ext2_inode* newinode = resolve_inode_number(newfile->inode);
+    struct ext2_inode* newinode = resolve_inode_number(newfile->inode - 1);
     
     // Set the file type of the inode
-    newinode->i_mode &= 0x0FFF;
+    newinode->i_mode &= ~0xF000;
     newinode->i_mode |= EXT2_S_IFDIR;
     // Set links count to 2
     newinode->i_links_count = 2;
 
     // Now, allocate a data block for the file
     int blockno = ex2_search_free_block_bitmap();
+    if (blockno == -1) {
+        // TODO add error handling here
+        // I should probably have it as a transaction style, where
+        // i temporarily have some stack-allocated versions of the data i want to alter
+        // then at the end, if there are no issues, memcopy it over.
+    }
 
     newinode->i_block[0] = blockno;
+    newinode->i_blocks = 2;
 
     // Since the logic for handling free block count is in e2_create_file_setup,
     // No checking for free space is needed.
     // (because these two entries will not take up 1024 bytes)
     // Write . and .. into it.
-    struct ext2_dir_entry* dot = ex2_search_free_dir_entry(newinode, ".", newfile->inode);
-    struct ext2_dir_entry* dotdot = ex2_search_free_dir_entry(newinode, "..", path_return.entry->inode);
-    
+    struct ext2_dir_entry* dot = ex2_search_free_dir_entry(newinode, ".", newfile->inode - 1);
+    struct ext2_dir_entry* dotdot = ex2_search_free_dir_entry(newinode, "..", inodenum);
+
     dot->file_type = EXT2_FT_DIR;
     dotdot->file_type = EXT2_FT_DIR;
 
     parentinode->i_links_count++;
 
+    // increment used_dirs_count in the superblock
+
+    // sync this when it comes to that
+    gd->bg_used_dirs_count++;
 
 
     
