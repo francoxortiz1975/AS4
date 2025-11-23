@@ -16,6 +16,7 @@
 
 #include "ext2.h"
 #include <string.h>
+#include <stdio.h>
 
 /**
  * TODO: add in here prototypes for any helpers you might need.
@@ -29,6 +30,17 @@ struct ext2_inode* resolve_inode_number(unsigned int inodeno);
 struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char* name, unsigned int inode);
 void ex2_free_dir_entry(struct ext2_dir_entry* entry);
 int ex2_search_free_block_bitmap();
+
+void write_block_data(int block_num, char *data);
+int file_init(struct ext2_dir_entry *file_entry, const char *source_path);
+void free_blocks(struct ext2_inode *inode, int new_blocks, int old_blocks);
+void assign_blocks(struct ext2_inode *inode, int old_blocks, int new_blocks_needed);
+void copy_to_file(struct ext2_inode *inode, FILE *source, int blocks_needed);
+int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_path);
+int file_exists(const char *filepath);
+int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, const char *src);
+int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src);
+
 
 
 // Structs for helper functions

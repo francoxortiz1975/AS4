@@ -29,8 +29,30 @@ int32_t ext2_fsal_cp(const char *src,
      */
 
      /* This is just to avoid compilation warnings, remove these 2 lines when you're done. */
-    (void)src;
-    (void)dst;
+        //CHECK src if valid file
+    if (!file_exists(src)) return -ENOENT;
+    
+    //CHECK path with pathwalk helper
+    struct ex2_dir_wrapper dst_result = e2_path_walk_absolute(dst);
+    
+    //IF 0, MEANS final entry exists
+    if (dst_result.errcode == 0) {
+        //IF this entry is a FOLDER
+        if (dst_result.entry->file_type == EXT2_FT_DIR) {
+            //COPY HERE
+            return copy_into_directory(dst_result.entry, src);
+        } else {
+        //entry is FILE
+            return file_overwrite(dst_result.entry, src);
+        }
+    }
+    else if (dst_result.errcode == 1) {
+    //if 1, father exists, 
+        return create_new_file(dst_result.entry, dst_result.last_token, src);
+    }
+    else {
+        return -ENOENT;
+    }
 
     return 0;
 }
