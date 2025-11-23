@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <pthread.h>
 
 // Global variables
 extern unsigned char* disk; 
@@ -22,6 +23,9 @@ extern struct ext2_super_block *sb;
 extern struct ext2_group_desc* gd;
 extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
+extern pthread_rwlock_t inode_locks[32];
+extern pthread_rwlock_t sb_lock;
+extern pthread_rwlock_t gd_lock;
 
 
 // Initializes the ext2 file system

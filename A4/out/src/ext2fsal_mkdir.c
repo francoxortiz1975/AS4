@@ -18,8 +18,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <pthread.h>
 
+// Global variables
+extern unsigned char* disk; 
+extern struct ext2_super_block *sb;
+extern struct ext2_group_desc* gd;
+extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
+
+extern pthread_rwlock_t inode_locks[32];
+extern pthread_rwlock_t sb_lock;
+extern pthread_rwlock_t gd_lock;
 
 
 
@@ -35,7 +45,7 @@ int32_t ext2_fsal_mkdir(const char *path)
     // TODO
 
     // Take the path, path walk through it.
-    struct ex2_dir_wrapper path_return = e2_path_walk_absolute(path);
+    struct ex2_dir_wrapper path_return = e2_path_walk_absolute(path, 0);
     unsigned int inodenum;
     // Make sure to free the dir_wrapper after use!
     if (path_return.errcode < 0) {
@@ -44,12 +54,15 @@ int32_t ext2_fsal_mkdir(const char *path)
     else if (path_return.errcode == 0) { // This means the entry is an existing inode
         // If it's a regular file, return ENOENT
         if (path_return.entry->file_type == EXT2_FT_REG_FILE) {
+            pthread_rwlock_unlock(&inode_locks[path_return.entry->inode - 1]);
             return -ENOENT;
         } else if (path_return.entry->file_type == EXT2_FT_DIR) {
+            pthread_rwlock_unlock(&inode_locks[path_return.entry->inode - 1]);
             return -EEXIST;
         } else {
             // TODO check what happens if it's a symlink
             fprintf(stderr, "ext2fsal_mkdir: Unknown what occurs if ending path element is a symlink\n");
+            pthread_rwlock_unlock(&inode_locks[path_return.entry->inode - 1]);
             exit(1);
         }
 
@@ -80,7 +93,7 @@ int32_t ext2_fsal_mkdir(const char *path)
     struct ext2_dir_entry* newfile = e2_create_file_setup(path_return.entry, name, 1);
     free(name);
     if (newfile == NULL) {
-        
+        pthread_rwlock_unlock(&inode_locks[path_return.entry->inode - 1]);
         return -ENOSPC;
     }
     newfile->file_type = EXT2_FT_DIR;
@@ -94,13 +107,12 @@ int32_t ext2_fsal_mkdir(const char *path)
     newinode->i_links_count = 2;
 
     // Now, allocate a data block for the file
+    // TODO add locks for gd and sb
+    pthread_rwlock_wrlock(&sb_lock);
+    pthread_rwlock_wrlock(&gd_lock);
     int blockno = ex2_search_free_block_bitmap();
-    if (blockno == -1) {
-        // TODO add error handling here
-        // I should probably have it as a transaction style, where
-        // i temporarily have some stack-allocated versions of the data i want to alter
-        // then at the end, if there are no issues, memcopy it over.
-    }
+    pthread_rwlock_unlock(&gd_lock);
+    pthread_rwlock_unlock(&sb_lock);
 
     newinode->i_block[0] = blockno;
     newinode->i_blocks = 2;
@@ -120,9 +132,17 @@ int32_t ext2_fsal_mkdir(const char *path)
     // increment used_dirs_count in the superblock
 
     // sync this when it comes to that
+    pthread_rwlock_wrlock(&gd_lock);
     gd->bg_used_dirs_count++;
+    pthread_rwlock_unlock(&gd_lock);
 
-
+    // free the new file lock
+    pthread_rwlock_unlock(&inode_locks[newfile->inode - 1]);
     
+    // free the parent directory lock
+    pthread_rwlock_unlock(&inode_locks[inodenum]);
+
+
+
     return 0;
 }
