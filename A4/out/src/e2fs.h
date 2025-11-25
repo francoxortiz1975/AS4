@@ -31,6 +31,7 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
 void ex2_free_dir_entry(struct ext2_dir_entry* entry);
 int ex2_search_free_block_bitmap();
 
+
 void write_block_data(int block_num, char *data);
 int file_init(struct ext2_dir_entry *file_entry, const char *source_path);
 void free_blocks(struct ext2_inode *inode, int new_blocks, int old_blocks);
@@ -40,7 +41,7 @@ int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_pat
 int file_exists(const char *filepath);
 int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, const char *src);
 int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src);
-
+void ex2_unmark_inode_bitmap(int index);
 
 
 // Structs for helper functions

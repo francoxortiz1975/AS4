@@ -131,7 +131,7 @@ static int ex2_search_free_inode_bitmap() {
 }
 
 
-static void ex2_unmark_inode_bitmap(int index) {
+void ex2_unmark_inode_bitmap(int index) {
     // Get the inode bitmap, table from the group descriptor
     unsigned char* inode_bitmap = (disk + (1024 * gd->bg_inode_bitmap));
 
