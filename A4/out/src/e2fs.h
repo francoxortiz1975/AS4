@@ -24,7 +24,7 @@
  */
 
 // .....
-struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly);
+struct ex2_dir_wrapper e2_path_walk_absolute(const char* path);
 struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name, int blocks_needed);
 struct ext2_inode* resolve_inode_number(unsigned int inodeno);
 struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char* name, unsigned int inode);

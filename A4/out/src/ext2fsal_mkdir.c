@@ -27,9 +27,9 @@ extern struct ext2_group_desc* gd;
 extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
 
-extern pthread_rwlock_t inode_locks[32];
-extern pthread_rwlock_t sb_lock;
-extern pthread_rwlock_t gd_lock;
+extern pthread_mutex_t inode_locks[32];
+extern pthread_mutex_t sb_lock;
+extern pthread_mutex_t gd_lock;
 
 
 
@@ -45,24 +45,24 @@ int32_t ext2_fsal_mkdir(const char *path)
     // TODO
 
     // Take the path, path walk through it.
-    struct ex2_dir_wrapper path_return = e2_path_walk_absolute(path, 0);
+    struct ex2_dir_wrapper path_return = e2_path_walk_absolute(path);
     unsigned int inodenum;
     // Make sure to free the dir_wrapper after use!
     if (path_return.errcode < 0) {
-        return -EEXIST;
+        return EEXIST;
     }
     else if (path_return.errcode == 0) { // This means the entry is an existing inode
         // If it's a regular file, return ENOENT
         if (path_return.entry->file_type == EXT2_FT_REG_FILE) {
-            pthread_rwlock_unlock(&inode_locks[path_return.entry->inode - 1]);
-            return -ENOENT;
+            pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
+            return ENOENT;
         } else if (path_return.entry->file_type == EXT2_FT_DIR) {
-            pthread_rwlock_unlock(&inode_locks[path_return.entry->inode - 1]);
-            return -EEXIST;
+            pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
+            return EEXIST;
         } else {
             // TODO check what happens if it's a symlink
             fprintf(stderr, "ext2fsal_mkdir: Unknown what occurs if ending path element is a symlink\n");
-            pthread_rwlock_unlock(&inode_locks[path_return.entry->inode - 1]);
+            pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
             exit(1);
         }
 
@@ -90,11 +90,14 @@ int32_t ext2_fsal_mkdir(const char *path)
     // Before creating an inode and file for the directory, check if there are 
 
     // Create a file with the helper function
+    // Note this function claims the sb and gd locks
     struct ext2_dir_entry* newfile = e2_create_file_setup(path_return.entry, name, 1);
     free(name);
     if (newfile == NULL) {
-        pthread_rwlock_unlock(&inode_locks[path_return.entry->inode - 1]);
-        return -ENOSPC;
+        pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
+        pthread_mutex_unlock(&gd_lock);
+        pthread_mutex_unlock(&sb_lock);
+        return ENOSPC;
     }
     newfile->file_type = EXT2_FT_DIR;
 
@@ -107,12 +110,13 @@ int32_t ext2_fsal_mkdir(const char *path)
     newinode->i_links_count = 2;
 
     // Now, allocate a data block for the file
-    // TODO add locks for gd and sb
-    pthread_rwlock_wrlock(&sb_lock);
-    pthread_rwlock_wrlock(&gd_lock);
+    // This also cannot be null since create_file_setup would return an error if there is no space
     int blockno = ex2_search_free_block_bitmap();
-    pthread_rwlock_unlock(&gd_lock);
-    pthread_rwlock_unlock(&sb_lock);
+
+    gd->bg_used_dirs_count++;
+
+    pthread_mutex_unlock(&gd_lock);
+    pthread_mutex_unlock(&sb_lock);
 
     newinode->i_block[0] = blockno;
     newinode->i_blocks = 2;
@@ -131,16 +135,11 @@ int32_t ext2_fsal_mkdir(const char *path)
 
     // increment used_dirs_count in the superblock
 
-    // sync this when it comes to that
-    pthread_rwlock_wrlock(&gd_lock);
-    gd->bg_used_dirs_count++;
-    pthread_rwlock_unlock(&gd_lock);
-
     // free the new file lock
-    pthread_rwlock_unlock(&inode_locks[newfile->inode - 1]);
+    pthread_mutex_unlock(&inode_locks[newfile->inode - 1]);
     
     // free the parent directory lock
-    pthread_rwlock_unlock(&inode_locks[inodenum]);
+    pthread_mutex_unlock(&inode_locks[inodenum]);
 
 
 

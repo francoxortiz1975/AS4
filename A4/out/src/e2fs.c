@@ -31,9 +31,9 @@ extern struct ext2_group_desc* gd;
 extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
 
-extern pthread_rwlock_t inode_locks[32];
-extern pthread_rwlock_t sb_lock;
-extern pthread_rwlock_t gd_lock;
+extern pthread_mutex_t inode_locks[32];
+extern pthread_mutex_t sb_lock;
+extern pthread_mutex_t gd_lock;
 
 
 static const int DIR_ENTRY_MIN_SIZE = 8;
@@ -66,6 +66,8 @@ static int ex2_find_free_blocks_count() {
  * This function searches the block bitmap and returns the index of the first free non-reserved entry.
  * It also marks the bitmap entry as claimed.
  * If none is found, returns -1.
+ * 
+ * Lock Info: It assumes the sb and gd locks are claimed.
  */
 int ex2_search_free_block_bitmap() {
     unsigned char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
@@ -88,7 +90,7 @@ int ex2_search_free_block_bitmap() {
                 gd->bg_free_blocks_count--;
 
                 // return the block
-                return blockno;
+                return blockno + 1;
                 
             }
         }
@@ -103,12 +105,9 @@ int ex2_search_free_block_bitmap() {
  * It also marks the bitmap entry as claimed.
  * If none is found, returns -1.
  * 
- * Lock Info: It acquires and releases a write lock on the superblock and group descriptor locks.
+ * Lock Info: It assumes the sb and gd locks are already held.
  */
 static int ex2_search_free_inode_bitmap() {
-
-    pthread_rwlock_wrlock(&sb_lock);
-    pthread_rwlock_wrlock(&gd_lock);
 
     // Get the inode bitmap, table from the group descriptor
     unsigned char* inode_bitmap = (disk + (1024 * gd->bg_inode_bitmap));
@@ -131,17 +130,12 @@ static int ex2_search_free_inode_bitmap() {
                 sb->s_free_inodes_count--;
                 gd->bg_free_inodes_count--;
 
-                pthread_rwlock_unlock(&gd_lock);
-                pthread_rwlock_unlock(&sb_lock);
-
                 // Return the pointer
                 return inodeno;
             }
         }
     }
 
-    pthread_rwlock_unlock(&gd_lock);
-    pthread_rwlock_unlock(&sb_lock);
     // Nothing found, return -1
     return -1;
 }
@@ -313,16 +307,8 @@ static struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, ch
     return NULL;
 }
 
-void choose_lock(pthread_rwlock_t* lock, int readonly) {
-    if (readonly)
-        pthread_rwlock_rdlock(lock);
-    else
-        pthread_rwlock_wrlock(lock);
-}
-
 /**
  * This function implements a path-walk, given an absolute path string.
- * It also takes in a readonly argument, which is 1 for the first args of cp and ln, and false otherwise.
  * It returns an ex2_dir_wrapper, a struct containing:
  * - a pointer to a directory entry (file, symlink, or directory) which is NULL on failure
  *   It can also be NULL if errcode returns 1 and the path is from the root dir, like with "/1"
@@ -336,20 +322,16 @@ void choose_lock(pthread_rwlock_t* lock, int readonly) {
  * - ENOENT if there is an item that doesn't exist
  * Note: If it is a nonexistent file in the root directory, like "/foo", it will return a null directory entry.
  * 
- * Lock Info: It returns holding the write (or read if readonly) lock of the parent directory and the file (if it exists).
+ * Lock Info: It returns holding the lock of the parent directory and the file (if it exists).
  * If there is an error, the function returns holding no locks.
  */
-struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
+struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
     struct ex2_dir_wrapper wrap;
     // Check that the first character of the string is / (so it's properly absolute)
     if (path[0] != '/') {
         wrap.errcode = -EFAULT;
         return wrap;
     }
-
-    // use strrchr to find the last /
-    char* last_slash = strrchr(path, '/');
-    int len_last_string = strlen(last_slash + 1);
 
     // Since it does start with /, start with inode 2 (the / directory)
     // Lock the root directory
@@ -359,8 +341,8 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
     char* next_slash = strchr(previous_slash + 1, '/');
     struct ext2_inode* current_dir_inode = root_inode;
     struct ext2_dir_entry* current_dir_entry = NULL;
-    pthread_rwlock_t* prev_lock = &inode_locks[1];
-    pthread_rwlock_t* new_lock = prev_lock;
+    pthread_mutex_t* prev_lock = &inode_locks[1];
+    pthread_mutex_t* new_lock = prev_lock;
 
     if (next_slash == NULL) {
         // It is the root directory
@@ -370,20 +352,20 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
             wrap.errcode = 0;
             wrap.last_token = previous_slash + 1;
 
-            choose_lock(prev_lock, readonly);
+            pthread_mutex_lock(prev_lock);
             return wrap;
         } 
         // It's in the root directory
         else {
             // get a lock for this
-            choose_lock(prev_lock, readonly);
+            pthread_mutex_lock(prev_lock);
             // try to see if it exists
-            struct ext2_dir_entry* found_entry = e2_find_dir_entry(root_inode, previous_slash + 1, len_last_string);
+            struct ext2_dir_entry* found_entry = e2_find_dir_entry(root_inode, previous_slash + 1, strlen(previous_slash + 1));
             wrap.parent_inode = 1;
 
             if (found_entry != NULL) {
                 // Lock the found entry since it exists
-                choose_lock(&inode_locks[found_entry->inode - 1], readonly);
+                pthread_mutex_lock(&inode_locks[found_entry->inode - 1]);
     
                 wrap.entry = found_entry;
                 wrap.errcode = 0;
@@ -399,7 +381,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
         }
     }
     // Use a read or write lock depending on if the slash is the last or not
-    choose_lock(prev_lock, readonly && previous_slash != last_slash);
+    pthread_mutex_lock(prev_lock);
 
     // While in this loop, all path items should be directories
     while (next_slash != NULL && *(next_slash + 1) != '\0') {
@@ -408,7 +390,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
         int token_length = next_slash - previous_slash - 1;
         if (token_length == 0) {
             wrap.errcode = -EINVAL;
-            pthread_rwlock_unlock(prev_lock);
+            pthread_mutex_unlock(prev_lock);
             return wrap;
         }
 
@@ -417,15 +399,15 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
         // Check that the entry exists
         if (current_dir_entry == NULL) {
             wrap.errcode = -ENOENT;
-            pthread_rwlock_unlock(prev_lock);
+            pthread_mutex_unlock(prev_lock);
             return wrap;
         }
 
         // now you have the new inode, lock it
         new_lock = &inode_locks[current_dir_entry->inode - 1];
-        choose_lock(new_lock, readonly || previous_slash != last_slash);
+        pthread_mutex_lock(new_lock);
         // then, unlock the old inode
-        pthread_rwlock_unlock(prev_lock);
+        pthread_mutex_unlock(prev_lock);
         prev_lock = new_lock;
 
         current_dir_inode = resolve_inode_number(current_dir_entry->inode - 1);
@@ -453,7 +435,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
         // Check that it's the correct file type (directory)
         if (file_type != 'd') {
             wrap.errcode = -ENOENT;
-            pthread_rwlock_unlock(prev_lock);
+            pthread_mutex_unlock(prev_lock);
             return wrap;
         }
 
@@ -467,12 +449,12 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
     // If we have a path like /1/2/3, 3 will go here
     if (next_slash == NULL) {
         // Try to return the item if found.
-        struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, len_last_string);
+        struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, strlen(previous_slash + 1));
         wrap.parent_inode = current_dir_entry->inode - 1;
 
         if (found_entry != NULL) {
             // If it exists, lock it
-            choose_lock(&inode_locks[found_entry->inode - 1], readonly);
+            pthread_mutex_lock(&inode_locks[found_entry->inode - 1]);
             wrap.entry = found_entry;
             wrap.errcode = 0;
             wrap.last_token = previous_slash + 1;
@@ -488,12 +470,12 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
     // If we have a path like /1/2/3/, return the directory if it is one
     else {
         // Find the last item and check that it's a directory
-        struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, len_last_string - 1);
+        struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, strlen(previous_slash + 1) - 1);
         wrap.parent_inode = (current_dir_entry != NULL) ? current_dir_entry->inode - 1 : 1;
 
         if (found_entry != NULL && found_entry->file_type == 2) {
             // If it exists, lock it
-            choose_lock(&inode_locks[found_entry->inode - 1], readonly);
+            pthread_mutex_lock(&inode_locks[found_entry->inode - 1]);
             wrap.entry = found_entry;
             wrap.errcode = 0;
             wrap.last_token = previous_slash + 1;
@@ -515,9 +497,13 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path, int readonly) {
  * If parent is NULL, it refers to the root directory.
  * 
  * Lock info: It expects a lock to be held on the parent dir entry's inode. 
- * It also acquires a write lock for the new file.
+ * It also acquires a write lock for the new file. (Releases if NULL is returned)
+ * Lastly, it acquires the sb and gd locks, which must be released after (Even if NULL).
  */
 struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name, int blocks_needed) {
+    pthread_mutex_lock(&sb_lock);
+    pthread_mutex_lock(&gd_lock);
+
     // Find/allocate a new inode for the file
     int inodeno = ex2_search_free_inode_bitmap();
     if (inodeno == -1) return NULL;
@@ -532,7 +518,7 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
 
     // Initialize the inode (partially)
     // Obtain a write lock on the inode
-    pthread_rwlock_wrlock(&inode_locks[inodeno]);
+    pthread_mutex_lock(&inode_locks[inodeno]);
 
 
     // Temporarily initialize i_mode, i_size, i_dtime
@@ -565,36 +551,23 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
     struct ext2_dir_entry* new_dir_entry = ex2_search_free_dir_entry(parent_inode, name, inodeno);
     // If there is no space for the new entry (if in a new block), undo inode mapping and return.
     if (new_dir_entry == NULL) {
-        pthread_rwlock_wrlock(&sb_lock);
-        pthread_rwlock_wrlock(&gd_lock);    
         ex2_unmark_inode_bitmap(inodeno);
-        pthread_rwlock_unlock(&gd_lock);
-        pthread_rwlock_unlock(&sb_lock);
 
-        pthread_rwlock_unlock(&inode_locks[inodeno]);
+        pthread_mutex_unlock(&inode_locks[inodeno]);
         return NULL;
     }
 
-    // Prevent TOCTOU problems
-    // also grab sb and gd in order to prevent priority inversion
-    pthread_rwlock_wrlock(&sb_lock);
-    pthread_rwlock_wrlock(&gd_lock);
     // Check that there are enough free blocks in the system
     int free_blocks = ex2_find_free_blocks_count();
 
     // If there is no space left, undo the new inode mapping and dir entry and return
     if (free_blocks < blocks_needed) {
         ex2_unmark_inode_bitmap(inodeno);
-        pthread_rwlock_unlock(&gd_lock);
-        pthread_rwlock_unlock(&sb_lock);
 
         ex2_free_dir_entry(new_dir_entry);
-        pthread_rwlock_unlock(&inode_locks[inodeno]);
+        pthread_mutex_unlock(&inode_locks[inodeno]);
         return NULL;
     }
-    pthread_rwlock_unlock(&gd_lock);
-    pthread_rwlock_unlock(&sb_lock);
-
 
     // superblock/group descriptors have been updated in helpers, so no work necessary here
     return new_dir_entry;

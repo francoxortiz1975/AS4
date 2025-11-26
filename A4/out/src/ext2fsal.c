@@ -33,11 +33,11 @@ unsigned char* inode_table;
 // The root directory inode, since it's used on every path walk
 struct ext2_inode* root_inode;
 // An array of locks for each inode
-pthread_rwlock_t inode_locks[32];
+pthread_mutex_t inode_locks[32];
 // Global locks for the superblock and group descriptor
 // ALWAYS LOCK THE SB before the GD!
-pthread_rwlock_t sb_lock;
-pthread_rwlock_t gd_lock;
+pthread_mutex_t sb_lock;
+pthread_mutex_t gd_lock;
 
 void ext2_fsal_init(const char* image)
 {
@@ -69,14 +69,14 @@ void ext2_fsal_init(const char* image)
     // Initialize every lock
     for (int i = 0; i < 32; i++)
     {
-        pthread_rwlock_t* lock = &inode_locks[i];
-        if (pthread_rwlock_init(lock, NULL) != 0) {
+        pthread_mutex_t* lock = &inode_locks[i];
+        if (pthread_mutex_init(lock, NULL) != 0) {
             // Check for errors, exit if encountered
             exit(1);
         } 
     }
     // Initialize superblock and group descriptor locks, exiting on errors
-    if (pthread_rwlock_init(&sb_lock, NULL) || pthread_rwlock_init(&gd_lock, NULL)) {
+    if (pthread_mutex_init(&sb_lock, NULL) || pthread_mutex_init(&gd_lock, NULL)) {
         exit(1);
     }
     
