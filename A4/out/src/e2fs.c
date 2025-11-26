@@ -39,6 +39,9 @@ extern pthread_mutex_t gd_lock;
 static const int DIR_ENTRY_MIN_SIZE = 8;
 
 
+
+
+
 /**
  * This helper function returns the number of free blocks on the drive.
  * 
@@ -47,7 +50,7 @@ static const int DIR_ENTRY_MIN_SIZE = 8;
 static int ex2_find_free_blocks_count() {
     unsigned char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
     int free_blocks = 0;
-    for (int i = 0; i < sb->s_inodes_count / 8; i++) {
+    for (int i = 0; i < sb->s_blocks_count / 8; i++) {
         char block_byte = *(block_bitmap + i);
         // Check each bit
         for (char j = 0; j < 8; j++) {
@@ -182,6 +185,9 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
     // If initializing with "."
     if (folder->i_size == 0) {
         struct ext2_dir_entry* new_entry = (struct ext2_dir_entry*)(disk + (1024 * folder->i_block[0]));
+        // truncate the file
+        memset(new_entry, 0, 1024);
+
         new_entry->inode = inode + 1;
         new_entry->rec_len = EXT2_BLOCK_SIZE;
         new_entry->name_len = strlen(name);
@@ -196,7 +202,7 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
         int block_num = folder->i_block[i];
         
 
-        struct ext2_dir_entry* entry = (struct ext2_dir_entry*)(disk + (1024 * block_num));
+        struct ext2_dir_entry* entry;
         // Loop through the block
         do {
             entry = (struct ext2_dir_entry *)(disk + (1024 * block_num) + size_acc);
@@ -217,17 +223,22 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
                 new_entry->rec_len = next_block_boundary - (char*)new_entry;
             } else {
                 // You have to allocate a new block first.
-                int new_block = ex2_search_free_block_bitmap();
+                int new_block_no = ex2_search_free_block_bitmap();
 
                 // TODO check to see if this is enough for error handling/propagation
-                if (new_block == -1) return NULL;
+                if (new_block_no == -1) return NULL;
+
+                char* new_block = (char*)(disk + new_block_no * EXT2_BLOCK_SIZE);
 
                 // Edit inode data
-                folder->i_block[i+1] = new_block;
+                folder->i_block[i+1] = new_block_no;
                 folder->i_blocks += 2;
 
+                // In the new block, truncate the data to prevent corruption
+                memset(new_block, 0, 1024);
+
                 // Declare new entry
-                new_entry = (struct ext2_dir_entry *)(disk + block_num * EXT2_BLOCK_SIZE);
+                new_entry = (struct ext2_dir_entry *)new_block;
                 new_entry->rec_len = EXT2_BLOCK_SIZE;
 
                 folder->i_size += EXT2_BLOCK_SIZE;
@@ -574,3 +585,341 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
 
 }
 
+//-------------------ADDED FOR CP--------------------------//
+
+//helper for file_init : writes buffer to block
+void write_block_data(int block_num, char *data) {
+    //offset of the disk + block
+    unsigned char *block_location = disk + (block_num * 1024);
+    
+    //copy data to block location
+    memcpy(block_location, data, 1024);
+}
+
+int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
+    //get file in read + binary op
+    FILE *source = fopen(source_path, "rb");
+
+    if (!source) return -ENOENT;  // error if not source
+
+    //get size, we move to the end of file
+    fseek(source, 0, SEEK_END);
+    int file_size = ftell(source);
+    //once we get size with ftell, go back
+    rewind(source);
+
+    //extract the file inode in entry already
+    struct ext2_inode *file_inode = resolve_inode_number(file_entry->inode);
+
+    //compute how many blocks we need
+    int blocks_needed = (file_size + 1023) / 1024;
+
+    //we can assume file is not to big to require more than 13 blocks, 12 direct and first indirect
+    unsigned int *indirect_block = NULL;
+
+    for (int i = 0; i < blocks_needed; i++) {
+        int free_block = ex2_search_free_block_bitmap();
+
+        if (i < 12) {
+            // Bloques directos (0-11)
+            file_inode->i_block[i] = free_block;
+        } 
+        else {
+            //case indirect block
+            if (i == 12) {
+                //create a block inode
+                int indirect_block_num = ex2_search_free_block_bitmap();
+                file_inode->i_block[12] = indirect_block_num;
+                
+                //pointer to it in disk
+                indirect_block = (unsigned int*)(disk + (indirect_block_num * 1024));
+                
+                //clean the indirect block (1024 bytes)
+                memset(indirect_block, 0, 1024);
+            }
+            
+            // Guardar número de bloque en el bloque indirecto
+            indirect_block[i - 12] = free_block;
+        }
+
+        //1kb buffer
+        char buffer[1024];
+
+        //read from 1 to 1024 bytes from source and save it into buffer.
+        size_t bytes_read = fread(buffer, 1, 1024, source);
+
+        //if last, fill with 0s.
+        if (bytes_read < 1024) {
+            memset(buffer + bytes_read, 0, 1024 - bytes_read);
+        }
+
+        //normal blocks, sets of 1024 buffer
+        write_block_data(free_block, buffer);
+    }
+
+     //type and permission update.
+     //TYPE: REGULAR FILE, 
+     //PERMISSION: 6: rw owner, r, r 
+    file_inode->i_mode = EXT2_S_IFREG | 0644; 
+    file_inode->i_size = file_size; //size of file in bytes
+    file_inode->i_blocks = blocks_needed * 2;  //2 inodes of 512 bytes for 1 block of 1024
+
+    if (blocks_needed > 12) {
+    file_inode->i_blocks += 2;  // +1 bloque indirecto × 2 sectores
+}
+    fclose(source);
+    return 0;
+}
+
+static void ex2_unmark_block_bitmap(int block_num) {
+    //same logic as unmark inode bitmap
+    //positioon of bitmap
+    unsigned char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
+    
+    //
+    int bit_position = block_num - 1;  //to get the right index
+
+    //depending on the bit position, get the BLOCKBYTE where the block is.
+    unsigned char* block_byte = (block_bitmap + (bit_position / 8));
+    //then get the bit IN this BLOCKBYTE with mask
+    char bit = 1 << (bit_position % 8);
+    
+    //free byte: AND Operation with the actual byte, and the mask of the bit  NEGATED (so, it ill be 0, to be cleaned with AND
+    *block_byte &= ~bit;
+    
+    //counters update
+    sb->s_free_blocks_count++;
+    gd->bg_free_blocks_count++;
+}
+
+
+void free_blocks(struct ext2_inode *inode, int new_blocks, int old_blocks) {
+    //free blocks not needed
+    for (int i = new_blocks; i < old_blocks; i++) {
+        int block_to_free;
+        
+        //indirect
+        if (i < 12) {
+            block_to_free = inode->i_block[i];
+            inode->i_block[i] = 0;  // Limpiar referencia
+        } 
+        //direct
+        else {
+            //block
+            unsigned int *indirect = (unsigned int*)(disk + inode->i_block[12] * 1024);
+            block_to_free = indirect[i - 12];
+            indirect[i - 12] = 0;
+        }
+        
+        //unmark in bitmap
+        ex2_unmark_block_bitmap(block_to_free);
+    }
+    
+    //if indirect block no more needed
+    if (new_blocks <= 12 && old_blocks > 12) {
+        ex2_unmark_block_bitmap(inode->i_block[12]);
+        inode->i_block[12] = 0;
+    }
+}
+
+void assign_blocks(struct ext2_inode *inode, int old_blocks, int new_blocks_needed) {
+    unsigned int *indirect_block = NULL;
+    
+    //indirect block case
+    if (old_blocks > 12) {
+        indirect_block = (unsigned int*)(disk + (inode->i_block[12] * 1024));
+    }
+    
+    //from old blocks, to new blocks, free.
+    for (int i = old_blocks; i < new_blocks_needed; i++) {
+        int free_block = ex2_search_free_block_bitmap();
+        
+        if (i < 12) {
+            //direct 
+            inode->i_block[i] = free_block;
+        }
+        else {
+            //indirect
+            if (i == 12) {
+                //create indirect block
+                int indirect_block_num = ex2_search_free_block_bitmap();
+                inode->i_block[12] = indirect_block_num;
+                
+                //indirect
+                indirect_block = (unsigned int*)(disk + (indirect_block_num * 1024));
+                
+                //free set
+                memset(indirect_block, 0, 1024);
+            }
+            
+            //save free blocks in indirect block array, with its index.
+            indirect_block[i - 12] = free_block;
+        }
+    }
+}
+
+void copy_to_file(struct ext2_inode *inode, FILE *source, int blocks_needed) {
+
+    unsigned int *indirect_block = NULL;
+    
+    //if indirect block needed, get pointer
+    if (blocks_needed > 12) {
+        indirect_block = (unsigned int*)(disk + (inode->i_block[12] * 1024));
+    }
+    
+    //copy data for each block
+    for (int i = 0; i < blocks_needed; i++) {
+        int target_block;
+        
+        //direct
+        if (i < 12) {
+            //block destiny
+            target_block = inode->i_block[i];
+        } else {
+            //indirect
+            target_block = indirect_block[i - 12];
+        }
+        
+        //create a buffer to READ
+        char buffer[1024];
+        //read from 1 to 1024 bytes from source and copy it to buffer
+        size_t bytes_read = fread(buffer, 1, 1024, source);
+        
+        //if bytes incomplete, fill with 0
+        if (bytes_read < 1024) {
+            memset(buffer + bytes_read, 0, 1024 - bytes_read);
+        }
+        
+        //write int the block in mem
+        write_block_data(target_block, buffer);
+    }
+}
+
+
+
+int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_path) {
+    
+    // source path
+    FILE *source = fopen(source_path, "rb");
+    if (!source) return -ENOENT;
+    
+    fseek(source, 0, SEEK_END);
+    int new_file_size = ftell(source);
+    rewind(source);
+    
+    //existing inode
+    struct ext2_inode *existing_inode = resolve_inode_number(existing_entry->inode);
+    
+    // compute blocks
+    int old_blocks = existing_inode->i_blocks / 2;
+    int new_blocks_needed = (new_file_size + 1023) / 1024;
+    
+    //adjust if more blocks needed
+    if (new_blocks_needed < old_blocks) {
+        //free some blocks
+        free_blocks(existing_inode, new_blocks_needed, old_blocks);
+    }
+    else if (new_blocks_needed > old_blocks) {
+        //assign more block
+        assign_blocks(existing_inode, old_blocks, new_blocks_needed);
+    }
+    
+    //copy data
+    copy_to_file(existing_inode, source, new_blocks_needed);
+    
+    //inode new size
+    existing_inode->i_size = new_file_size;
+    //inode more info.
+    existing_inode->i_blocks = new_blocks_needed * 2;
+    if (new_blocks_needed > 12) {
+        existing_inode->i_blocks += 2;  // Bloque indirecto
+    }
+    
+    fclose(source);
+    return 0;
+}
+
+
+int file_exists(const char *filepath) {
+    FILE *file = fopen(filepath, "r");
+    if (file) {
+        fclose(file);
+        return 1;
+    }
+    return 0;  
+}
+
+
+int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
+    //GET Name of SRC
+    const char *filename = strrchr(src, '/');
+    if (filename) {
+        filename++; //skip /
+    } else {
+        filename = src; //use all filename, NO  /
+    }
+    
+    //get directory inode
+    struct ext2_inode *parent_inode = resolve_inode_number(dir_entry->inode);
+    
+    //check if already exists 
+    struct ext2_dir_entry *existing_file = e2_find_dir_entry(parent_inode, (char*)filename, strlen(filename));
+    
+    if (existing_file != NULL) {
+        //if EXISTS, overwrite
+        return file_overwrite(existing_file, src);
+    } else {
+        //DOESNT EXISTS, 
+        //check file
+        FILE *source = fopen(src, "rb");
+        if (!source) return -ENOENT;
+        
+        //to get the size for the blocks needed, we do fseek to the end
+        fseek(source, 0, SEEK_END);
+        int file_size = ftell(source);
+        fclose(source);
+        
+         //compute blocks needed
+
+        int blocks_needed = (file_size + 1023) / 1024;
+        
+        //setup helper
+        struct ext2_dir_entry *new_entry = e2_create_file_setup(dir_entry, (char*)filename, blocks_needed);
+        if (!new_entry) return -ENOSPC;
+        
+        //init helper
+        return file_init(new_entry, src);
+    }
+}
+
+int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, const char *src) {
+    //DOESNT EXISTS, 
+    //check file
+    FILE *source = fopen(src, "rb");
+    if (!source) return -ENOENT;
+    
+    //to get the size for the blocks needed, we do fseek to the end
+    fseek(source, 0, SEEK_END);
+    int file_size = ftell(source);
+    fclose(source);
+    
+    //compute blocks needed
+    int blocks_needed = (file_size + 1023) / 1024;
+    
+    //same tehcnique to get the size of the filename
+    char clean_filename[256];
+    strcpy(clean_filename, filename);
+    int len = strlen(clean_filename);
+
+    //IF TRAILING SLASH exists, not include it on the name.s
+    if (len > 0 && clean_filename[len-1] == '/') {
+        clean_filename[len-1] = '\0';
+    }
+    
+    //setup helper
+    struct ext2_dir_entry *new_entry = e2_create_file_setup(parent_entry, clean_filename, blocks_needed);
+    if (!new_entry) return -ENOSPC;
+    
+    //init helper
+    return file_init(new_entry, src);
+}
