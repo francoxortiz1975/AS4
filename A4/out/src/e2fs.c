@@ -43,7 +43,7 @@ static const int DIR_ENTRY_MIN_SIZE = 8;
 static int ex2_find_free_blocks_count() {
     unsigned char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
     int free_blocks = 0;
-    for (int i = 0; i < sb->s_inodes_count / 8; i++) {
+    for (int i = 0; i < sb->s_blocks_count / 8; i++) {
         char block_byte = *(block_bitmap + i);
         // Check each bit
         for (char j = 0; j < 8; j++) {
@@ -84,7 +84,7 @@ int ex2_search_free_block_bitmap() {
                 gd->bg_free_blocks_count--;
 
                 // return the block
-                return blockno;
+                return blockno + 1;
                 
             }
         }
@@ -166,6 +166,9 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
     // If initializing with "."
     if (folder->i_size == 0) {
         struct ext2_dir_entry* new_entry = (struct ext2_dir_entry*)(disk + (1024 * folder->i_block[0]));
+        // truncate the file
+        memset(new_entry, 0, 1024);
+
         new_entry->inode = inode + 1;
         new_entry->rec_len = EXT2_BLOCK_SIZE;
         new_entry->name_len = strlen(name);
@@ -180,7 +183,7 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
         int block_num = folder->i_block[i];
         
 
-        struct ext2_dir_entry* entry = (struct ext2_dir_entry*)(disk + (1024 * block_num));
+        struct ext2_dir_entry* entry;
         // Loop through the block
         do {
             entry = (struct ext2_dir_entry *)(disk + (1024 * block_num) + size_acc);
@@ -201,17 +204,22 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
                 new_entry->rec_len = next_block_boundary - (char*)new_entry;
             } else {
                 // You have to allocate a new block first.
-                int new_block = ex2_search_free_block_bitmap();
+                int new_block_no = ex2_search_free_block_bitmap();
 
                 // TODO check to see if this is enough for error handling/propagation
-                if (new_block == -1) return NULL;
+                if (new_block_no == -1) return NULL;
+
+                char* new_block = (char*)(disk + new_block_no * EXT2_BLOCK_SIZE);
 
                 // Edit inode data
-                folder->i_block[i+1] = new_block;
+                folder->i_block[i+1] = new_block_no;
                 folder->i_blocks += 2;
 
+                // In the new block, truncate the data to prevent corruption
+                memset(new_block, 0, 1024);
+
                 // Declare new entry
-                new_entry = (struct ext2_dir_entry *)(disk + block_num * EXT2_BLOCK_SIZE);
+                new_entry = (struct ext2_dir_entry *)new_block;
                 new_entry->rec_len = EXT2_BLOCK_SIZE;
 
                 folder->i_size += EXT2_BLOCK_SIZE;

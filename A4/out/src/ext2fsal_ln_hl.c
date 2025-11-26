@@ -38,10 +38,10 @@ int32_t ext2_fsal_ln_hl(const char *src,
     // Check if the source has errcode 0 (source file exists), if not return ENOENT
     // Also, check if it's a directory
     if (src_path_return.errcode != 0) {
-        return -ENOENT;
+        return ENOENT;
     }
     else if (src_path_return.errcode == 0 && src_path_return.entry->file_type == EXT2_FT_DIR) {
-        return -EISDIR;
+        return EISDIR;
     }
 
     unsigned int source_inode_num = src_path_return.entry->inode - 1;
@@ -50,15 +50,15 @@ int32_t ext2_fsal_ln_hl(const char *src,
     // After, path walk to the destination
     struct ex2_dir_wrapper dst_path_return = e2_path_walk_absolute(dst);
     
-    // Check if the source has errcode 1 (everything until final item exits), if not return EEXIST
+    // Check if the dest has errcode 1 (everything until final item exits), if not return EEXIST
     if (dst_path_return.errcode == 0 && dst_path_return.entry->file_type == EXT2_FT_DIR) {
-        return -EISDIR;
+        return EISDIR;
     }
     else if (dst_path_return.errcode < 0) {
-        return -ENOENT; // I assume, check with office hours
+        return ENOENT; 
     }
     else if (dst_path_return.errcode == 0) {
-        return -EEXIST;
+        return EEXIST;
     }
     // Finally, add a new directory entry to the parent directory pointing to the inode, with the name.
     int dest_parent_inode = (dst_path_return.entry != NULL) ? dst_path_return.entry->inode - 1 : 1;
@@ -75,7 +75,7 @@ int32_t ext2_fsal_ln_hl(const char *src,
     struct ext2_dir_entry* hl = ex2_search_free_dir_entry(folder, name, source_inode_num);
     free(name);
     if (hl == NULL) {
-        return -ENOSPC;
+        return ENOSPC;
     }
     // whoops, gotta actually fill the info out!!!
     hl->file_type = src_path_return.entry->file_type;
