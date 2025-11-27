@@ -39,15 +39,25 @@ int32_t ext2_fsal_ln_sl(const char *src,
     struct ex2_dir_wrapper dst_path_return = e2_path_walk_absolute(dst);
 
     // check if the destination has errcode
-    if (dst_path_return.errcode == 0 && dst_path_return.entry->file_type == EXT2_FT_DIR) {
-        return EISDIR;
+    if (dst_path_return.errcode != 1) {
+        if (dst_path_return.errcode == 0) {
+            // unlock the file and parent directory
+            pthread_mutex_unlock(&inode_locks[dst_path_return.entry->inode - 1]);
+            pthread_mutex_unlock(&inode_locks[dst_path_return.parent_inode]);
+
+            if (dst_path_return.entry->file_type == EXT2_FT_DIR) {
+                printf("ln_sl EISDIR\n");
+                return EISDIR;
+            }
+            else {
+                printf("ln_sl EEXIST\n");
+                return EEXIST;
+            }
+        }
+        printf("ln_sl ENOENT\n");
+        return ENOENT;         
     }
-    else if (dst_path_return.errcode < 0) {
-        return ENOENT;
-    }
-    else if (dst_path_return.errcode == 0) {
-        return EEXIST;
-    }
+
 
     char* name = calloc(strlen(dst_path_return.last_token) + 1, sizeof(char));
     strcpy(name, dst_path_return.last_token);
@@ -56,9 +66,14 @@ int32_t ext2_fsal_ln_sl(const char *src,
         *trailing_slash = '\0';
     }
     // Add a new file.
+    // Note this claims the sb and gd locks
     struct ext2_dir_entry* newfile = e2_create_file_setup(dst_path_return.entry, name, iterations);
     free(name);
     if (newfile == NULL) {
+        pthread_mutex_unlock(&inode_locks[dst_path_return.entry->inode - 1]);
+        pthread_mutex_unlock(&gd_lock);
+        pthread_mutex_unlock(&sb_lock);
+        printf("ln_sl ENOSPC\n");
         return ENOSPC;
     }
     newfile->file_type = EXT2_FT_SYMLINK;
@@ -85,6 +100,12 @@ int32_t ext2_fsal_ln_sl(const char *src,
         strncpy(block, src, 1024);
         newinode->i_block[i] = blockno;
     }
+
+    // Free the parent directory lock
+    pthread_mutex_unlock(&inode_locks[dst_path_return.parent_inode]);
+    // Free sb and gd locks
+    pthread_mutex_unlock(&gd_lock);
+    pthread_mutex_unlock(&sb_lock);
 
     return 0;
 }

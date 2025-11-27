@@ -29,6 +29,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path);
 struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name, int blocks_needed);
 struct ext2_inode* resolve_inode_number(unsigned int inodeno);
 struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char* name, unsigned int inode);
+struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* name, int name_length);
 void ex2_free_dir_entry(struct ext2_dir_entry* entry);
 int ex2_search_free_block_bitmap();
 
@@ -46,7 +47,7 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src);
 
 // Structs for helper functions
 struct ex2_dir_wrapper {
-    // Null on error
+    // Null on error or if in root directory like /1
     struct ext2_dir_entry* entry;
     // The parent directory inode. 0-indexed. If the entry is '/', return -1;
     int parent_inode;

@@ -32,6 +32,7 @@ extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
 
 extern pthread_mutex_t inode_locks[32];
+//extern char reference_counts[32];
 extern pthread_mutex_t sb_lock;
 extern pthread_mutex_t gd_lock;
 
@@ -45,7 +46,7 @@ static const int DIR_ENTRY_MIN_SIZE = 8;
 /**
  * This helper function returns the number of free blocks on the drive.
  * 
- * Lock Info: It assumes there is a read (or write) lock on the group descriptor.
+ * Lock Info: It assumes there is a lock on gd.
  */
 static int ex2_find_free_blocks_count() {
     unsigned char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
@@ -177,6 +178,7 @@ static int align_4_bytes(int num) {
  * This helper function searches and allocates a free directory entry in a directory inode
  * 
  * Lock Info: It expects that a write lock is held for the folder.
+ * It also assumes the sb and gd locks are claimed (if there needs to be a new node)
  */
 struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char* name, unsigned int inode) {
 
@@ -281,7 +283,7 @@ struct ext2_inode* resolve_inode_number(unsigned int inodeno) {
  * 
  * Lock info: A read (or write) lock should be held on the directory before calling this function.
  */
-static struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* name, int name_length) {
+struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* name, int name_length) {
     if (name_length == 0) return NULL;
     if (directory->i_mode >> 12 != EXT2_S_IFDIR >> 12) {
         fprintf(stderr, "e2_find_dir_entry: This was not called with a directory inode!\n");
@@ -340,7 +342,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
     struct ex2_dir_wrapper wrap;
     // Check that the first character of the string is / (so it's properly absolute)
     if (path[0] != '/') {
-        wrap.errcode = -EFAULT;
+        wrap.errcode = EFAULT;
         return wrap;
     }
 
@@ -400,7 +402,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
         // Evaluate the current "token"
         int token_length = next_slash - previous_slash - 1;
         if (token_length == 0) {
-            wrap.errcode = -EINVAL;
+            wrap.errcode = EINVAL;
             pthread_mutex_unlock(prev_lock);
             return wrap;
         }
@@ -409,7 +411,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
         current_dir_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, token_length);
         // Check that the entry exists
         if (current_dir_entry == NULL) {
-            wrap.errcode = -ENOENT;
+            wrap.errcode = ENOENT;
             pthread_mutex_unlock(prev_lock);
             return wrap;
         }
@@ -445,7 +447,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
         // In our assumptions, it states that a path will not include symlinks in the middle.
         // Check that it's the correct file type (directory)
         if (file_type != 'd') {
-            wrap.errcode = -ENOENT;
+            wrap.errcode = ENOENT;
             pthread_mutex_unlock(prev_lock);
             return wrap;
         }
@@ -482,7 +484,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
     else {
         // Find the last item and check that it's a directory
         struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, strlen(previous_slash + 1) - 1);
-        wrap.parent_inode = (current_dir_entry != NULL) ? current_dir_entry->inode - 1 : 1;
+        wrap.parent_inode = (current_dir_entry != NULL) ? current_dir_entry->inode - 1 : -1;
 
         if (found_entry != NULL && found_entry->file_type == 2) {
             // If it exists, lock it
@@ -587,7 +589,11 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
 
 //-------------------ADDED FOR CP--------------------------//
 
-//helper for file_init : writes buffer to block
+/**
+ * Helper for file_init, writes buffer to block.
+ * 
+ * Lock Info: N/A
+ */
 void write_block_data(int block_num, char *data) {
     //offset of the disk + block
     unsigned char *block_location = disk + (block_num * 1024);
@@ -595,13 +601,27 @@ void write_block_data(int block_num, char *data) {
     //copy data to block location
     memcpy(block_location, data, 1024);
 }
-
+/**
+ * Helper that initializes a file. It also sets the inode and dir_entry's
+ * file type.
+ * 
+ * Lock Info: It assumes the sb and gd locks are claimed, and unlocks them.
+ * It also expects a lock on the file_entry's inode, and releases it.
+ */
 int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     //get file in read + binary op
     FILE *source = fopen(source_path, "rb");
 
-    if (!source) return -ENOENT;  // error if not source
+    if (!source) {
+        pthread_mutex_unlock(&sb_lock);
+        pthread_mutex_unlock(&gd_lock);   
+        pthread_mutex_unlock(&inode_locks[file_entry->inode - 1]); 
+        return ENOENT;  // error if not source
+    }
 
+    // Modify the file_entry's file_type
+    file_entry->file_type = EXT2_FT_REG_FILE;
+    
     //get size, we move to the end of file
     fseek(source, 0, SEEK_END);
     int file_size = ftell(source);
@@ -609,7 +629,7 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     rewind(source);
 
     //extract the file inode in entry already
-    struct ext2_inode *file_inode = resolve_inode_number(file_entry->inode);
+    struct ext2_inode *file_inode = resolve_inode_number(file_entry->inode - 1);
 
     //compute how many blocks we need
     int blocks_needed = (file_size + 1023) / 1024;
@@ -656,21 +676,32 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
         //normal blocks, sets of 1024 buffer
         write_block_data(free_block, buffer);
     }
+    pthread_mutex_unlock(&sb_lock);
+    pthread_mutex_unlock(&gd_lock);
 
      //type and permission update.
      //TYPE: REGULAR FILE, 
      //PERMISSION: 6: rw owner, r, r 
-    file_inode->i_mode = EXT2_S_IFREG | 0644; 
+    // REVIEW: change i_mode, since we don't worry about permissions
+    file_inode->i_mode &= ~0xF000;
+    file_inode->i_mode |= EXT2_S_IFREG;
+
     file_inode->i_size = file_size; //size of file in bytes
     file_inode->i_blocks = blocks_needed * 2;  //2 inodes of 512 bytes for 1 block of 1024
 
     if (blocks_needed > 12) {
-    file_inode->i_blocks += 2;  // +1 bloque indirecto × 2 sectores
-}
+        file_inode->i_blocks += 2;  // +1 bloque indirecto × 2 sectores
+    }
     fclose(source);
+    pthread_mutex_unlock(&inode_locks[file_entry->inode - 1]);
     return 0;
 }
 
+/**
+ * This function unmarks the selected block from the bitmap.
+ * 
+ * Lock Info: It expects the sb and gd locks to be held.
+ */
 static void ex2_unmark_block_bitmap(int block_num) {
     //same logic as unmark inode bitmap
     //positioon of bitmap
@@ -692,7 +723,11 @@ static void ex2_unmark_block_bitmap(int block_num) {
     gd->bg_free_blocks_count++;
 }
 
-
+/**
+ * This helper frees unneeded blocks.
+ * 
+ * Lock Info: Expects the sb and gd locks to be held.
+ */
 void free_blocks(struct ext2_inode *inode, int new_blocks, int old_blocks) {
     //free blocks not needed
     for (int i = new_blocks; i < old_blocks; i++) {
@@ -721,7 +756,11 @@ void free_blocks(struct ext2_inode *inode, int new_blocks, int old_blocks) {
         inode->i_block[12] = 0;
     }
 }
-
+/**
+ * This helper assigns blocks.
+ * 
+ * Lock Info: It assumes the sb and gd locks are claimed.
+ */
 void assign_blocks(struct ext2_inode *inode, int old_blocks, int new_blocks_needed) {
     unsigned int *indirect_block = NULL;
     
@@ -757,7 +796,11 @@ void assign_blocks(struct ext2_inode *inode, int old_blocks, int new_blocks_need
         }
     }
 }
-
+/**
+ * Helper that copies a file to the inode blocks.
+ * 
+ * Lock Info: N/A
+ */
 void copy_to_file(struct ext2_inode *inode, FILE *source, int blocks_needed) {
 
     unsigned int *indirect_block = NULL;
@@ -796,24 +839,31 @@ void copy_to_file(struct ext2_inode *inode, FILE *source, int blocks_needed) {
 }
 
 
-
+/**
+ * Helper that overwrites a file.
+ * 
+ * Lock info: Locks and unlocks the sb and gd locks.
+ */
 int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_path) {
     
     // source path
     FILE *source = fopen(source_path, "rb");
-    if (!source) return -ENOENT;
+    if (!source) return ENOENT;
     
     fseek(source, 0, SEEK_END);
     int new_file_size = ftell(source);
     rewind(source);
     
     //existing inode
-    struct ext2_inode *existing_inode = resolve_inode_number(existing_entry->inode);
+    struct ext2_inode *existing_inode = resolve_inode_number(existing_entry->inode - 1);
     
     // compute blocks
     int old_blocks = existing_inode->i_blocks / 2;
     int new_blocks_needed = (new_file_size + 1023) / 1024;
-    
+
+    pthread_mutex_lock(&sb_lock);
+    pthread_mutex_lock(&gd_lock);
+
     //adjust if more blocks needed
     if (new_blocks_needed < old_blocks) {
         //free some blocks
@@ -824,6 +874,9 @@ int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_pat
         assign_blocks(existing_inode, old_blocks, new_blocks_needed);
     }
     
+    pthread_mutex_unlock(&sb_lock);
+    pthread_mutex_unlock(&gd_lock);
+
     //copy data
     copy_to_file(existing_inode, source, new_blocks_needed);
     
@@ -849,7 +902,12 @@ int file_exists(const char *filepath) {
     return 0;  
 }
 
-
+/**
+ * Helper that copies into a directory.
+ * 
+ * Lock info: It expects a lock to be held on the dir_entry's inode.
+ * It also locks and unlocks the sb and gd locks.
+ */
 int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
     //GET Name of SRC
     const char *filename = strrchr(src, '/');
@@ -860,7 +918,7 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
     }
     
     //get directory inode
-    struct ext2_inode *parent_inode = resolve_inode_number(dir_entry->inode);
+    struct ext2_inode *parent_inode = resolve_inode_number(dir_entry->inode - 1);
     
     //check if already exists 
     struct ext2_dir_entry *existing_file = e2_find_dir_entry(parent_inode, (char*)filename, strlen(filename));
@@ -872,7 +930,7 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
         //DOESNT EXISTS, 
         //check file
         FILE *source = fopen(src, "rb");
-        if (!source) return -ENOENT;
+        if (!source) return ENOENT;
         
         //to get the size for the blocks needed, we do fseek to the end
         fseek(source, 0, SEEK_END);
@@ -885,18 +943,28 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
         
         //setup helper
         struct ext2_dir_entry *new_entry = e2_create_file_setup(dir_entry, (char*)filename, blocks_needed);
-        if (!new_entry) return -ENOSPC;
+        if (!new_entry) {
+            pthread_mutex_unlock(&sb_lock);
+            pthread_mutex_unlock(&gd_lock);    
+            return ENOSPC;
+        }
         
         //init helper
         return file_init(new_entry, src);
     }
 }
-
+/**
+ * This helper creates a new file.
+ * 
+ * Lock Info: It expects a lock held on the parent_entry's inode.
+ * It acquires a write lock for the new file.
+ * It acquires and releases the sb and gd locks.
+ */
 int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, const char *src) {
     //DOESNT EXISTS, 
     //check file
     FILE *source = fopen(src, "rb");
-    if (!source) return -ENOENT;
+    if (!source) return ENOENT;
     
     //to get the size for the blocks needed, we do fseek to the end
     fseek(source, 0, SEEK_END);
@@ -918,7 +986,11 @@ int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, c
     
     //setup helper
     struct ext2_dir_entry *new_entry = e2_create_file_setup(parent_entry, clean_filename, blocks_needed);
-    if (!new_entry) return -ENOSPC;
+    if (!new_entry) {
+        pthread_mutex_unlock(&sb_lock);
+        pthread_mutex_unlock(&gd_lock);
+        return ENOSPC;
+    }
     
     //init helper
     return file_init(new_entry, src);

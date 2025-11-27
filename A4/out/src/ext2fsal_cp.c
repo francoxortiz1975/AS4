@@ -19,6 +19,10 @@
 #include <string.h>
 #include <errno.h>
 
+extern pthread_mutex_t inode_locks[32];
+extern pthread_mutex_t sb_lock;
+extern pthread_mutex_t gd_lock;
+
 
 int32_t ext2_fsal_cp(const char *src,
                      const char *dst)
@@ -30,28 +34,40 @@ int32_t ext2_fsal_cp(const char *src,
 
      /* This is just to avoid compilation warnings, remove these 2 lines when you're done. */
         //CHECK src if valid file
-    if (!file_exists(src)) return -ENOENT;
+    if (!file_exists(src)) return ENOENT;
     
     //CHECK path with pathwalk helper
     struct ex2_dir_wrapper dst_result = e2_path_walk_absolute(dst);
     
+    int parent_lock_num = dst_result.parent_inode;
+    
+    int returncode;
     //IF 0, MEANS final entry exists
     if (dst_result.errcode == 0) {
+        int file_lock_num = dst_result.entry->inode - 1;
         //IF this entry is a FOLDER
         if (dst_result.entry->file_type == EXT2_FT_DIR) {
             //COPY HERE
-            return copy_into_directory(dst_result.entry, src);
+            returncode = copy_into_directory(dst_result.entry, src);
+            pthread_mutex_unlock(&inode_locks[parent_lock_num]);
+            pthread_mutex_unlock(&inode_locks[file_lock_num]);
+            return returncode;
         } else {
-        //entry is FILE
-            return file_overwrite(dst_result.entry, src);
+            // entry is FILE
+            returncode = file_overwrite(dst_result.entry, src);
+            pthread_mutex_unlock(&inode_locks[parent_lock_num]);
+            pthread_mutex_unlock(&inode_locks[file_lock_num]);
+            return returncode;
         }
     }
     else if (dst_result.errcode == 1) {
-    //if 1, father exists, 
-        return create_new_file(dst_result.entry, dst_result.last_token, src);
+        // if 1, father exists, 
+        returncode = create_new_file(dst_result.entry, dst_result.last_token, src);    
+        pthread_mutex_unlock(&inode_locks[parent_lock_num]);
+        return returncode;
     }
     else {
-        return -ENOENT;
+        return ENOENT;
     }
 
     return 0;

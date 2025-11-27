@@ -34,6 +34,8 @@ unsigned char* inode_table;
 struct ext2_inode* root_inode;
 // An array of locks for each inode
 pthread_mutex_t inode_locks[32];
+// An array of reference counts, used for multi-path operations (ln_hl)
+//char reference_counts[32];
 // Global locks for the superblock and group descriptor
 // ALWAYS LOCK THE SB before the GD!
 pthread_mutex_t sb_lock;
@@ -75,6 +77,8 @@ void ext2_fsal_init(const char* image)
             exit(1);
         } 
     }
+    // Initialize reference_counts
+    //memset(reference_counts, 0, 32);
     // Initialize superblock and group descriptor locks, exiting on errors
     if (pthread_mutex_init(&sb_lock, NULL) || pthread_mutex_init(&gd_lock, NULL)) {
         exit(1);

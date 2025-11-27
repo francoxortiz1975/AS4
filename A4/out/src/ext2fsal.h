@@ -24,6 +24,7 @@ extern struct ext2_group_desc* gd;
 extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
 extern pthread_mutex_t inode_locks[32];
+//extern char reference_counts[32];
 extern pthread_mutex_t sb_lock;
 extern pthread_mutex_t gd_lock;
 

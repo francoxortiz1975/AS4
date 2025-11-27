@@ -49,15 +49,23 @@ int32_t ext2_fsal_mkdir(const char *path)
     unsigned int inodenum;
     // Make sure to free the dir_wrapper after use!
     if (path_return.errcode < 0) {
+        printf("mkdir EEXIST\n");
         return EEXIST;
     }
     else if (path_return.errcode == 0) { // This means the entry is an existing inode
         // If it's a regular file, return ENOENT
+        
+        // Also unlock the parent directory
+        pthread_mutex_unlock(&inode_locks[path_return.parent_inode]);
+
         if (path_return.entry->file_type == EXT2_FT_REG_FILE) {
+            // Unlock the inode
             pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
+            printf("mkdir ENOENT\n");
             return ENOENT;
         } else if (path_return.entry->file_type == EXT2_FT_DIR) {
             pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
+            printf("mkdir EEXIST\n");
             return EEXIST;
         } else {
             // TODO check what happens if it's a symlink
@@ -97,6 +105,7 @@ int32_t ext2_fsal_mkdir(const char *path)
         pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
         pthread_mutex_unlock(&gd_lock);
         pthread_mutex_unlock(&sb_lock);
+        printf("mkdir ENOSPC\n");
         return ENOSPC;
     }
     newfile->file_type = EXT2_FT_DIR;

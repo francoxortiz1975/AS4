@@ -20,6 +20,39 @@
 #include <string.h>
 #include <errno.h>
 
+// Global variables
+extern unsigned char* disk; 
+extern struct ext2_super_block *sb;
+extern struct ext2_group_desc* gd;
+extern unsigned char* inode_table;
+extern struct ext2_inode* root_inode;
+
+extern pthread_mutex_t inode_locks[32];
+extern pthread_mutex_t sb_lock;
+extern pthread_mutex_t gd_lock;
+
+static void lock_locks(int src_lock_dir, int src_lock_file, int dst_lock_dir) {
+    if (src_lock_dir < dst_lock_dir) {
+        pthread_mutex_lock(&inode_locks[src_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_file]);
+        pthread_mutex_lock(&inode_locks[dst_lock_dir]);
+    } else if (src_lock_dir > dst_lock_dir) {
+        pthread_mutex_lock(&inode_locks[dst_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_file]);
+    } else {
+        // src_lock_dir == dst_lock_dir
+        pthread_mutex_lock(&inode_locks[src_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_file]);
+    }
+}
+
+static void unlock_locks(int src_dir, int src_file, int dst_dir) {
+    pthread_mutex_unlock(&inode_locks[src_dir]);
+    pthread_mutex_unlock(&inode_locks[src_file]);
+    if (src_dir != dst_dir)
+        pthread_mutex_unlock(&inode_locks[dst_dir]);
+}
 
 int32_t ext2_fsal_ln_hl(const char *src,
                         const char *dst)
@@ -29,59 +62,133 @@ int32_t ext2_fsal_ln_hl(const char *src,
      * src and dst are the ln command arguments described in the handout.
      */
 
-     /* This is just to avoid compilation warnings, remove these 3 lines when you're done. */
     // Take the source, path walk through it.
     struct ex2_dir_wrapper src_path_return = e2_path_walk_absolute(src);
+    // store locks
+    int src_lock_file;
+    int src_lock_dir = src_path_return.parent_inode;
 
 
     // what you need to do is get the inode of the source.
     // Check if the source has errcode 0 (source file exists), if not return ENOENT
     // Also, check if it's a directory
-    if (src_path_return.errcode != 0) {
+    if (src_path_return.errcode < 0) {
+        printf("ln_hl ENOENT\n");
         return ENOENT;
     }
-    else if (src_path_return.errcode == 0 && src_path_return.entry->file_type == EXT2_FT_DIR) {
+    src_lock_file = src_path_return.entry->inode - 1;
+    if (src_path_return.errcode == 0 && src_path_return.entry->file_type == EXT2_FT_DIR) {
+        pthread_mutex_unlock(&inode_locks[src_lock_file]);
+        pthread_mutex_unlock(&inode_locks[src_lock_dir]);
+        printf("ln_hl EISDIR\n");
         return EISDIR;
     }
-
-    unsigned int source_inode_num = src_path_return.entry->inode - 1;
+    else if (src_path_return.errcode == 1) {
+        pthread_mutex_unlock(&inode_locks[src_lock_file]);
+        pthread_mutex_unlock(&inode_locks[src_lock_dir]);
+        printf("ln_hl ENOENT\n");
+        return ENOENT;
+    }
+    // Temporarily unlock the file and parent directory
+    pthread_mutex_unlock(&inode_locks[src_lock_file]);
+    pthread_mutex_unlock(&inode_locks[src_lock_dir]);
 
 
     // After, path walk to the destination
     struct ex2_dir_wrapper dst_path_return = e2_path_walk_absolute(dst);
-    
-    // Check if the dest has errcode 1 (everything until final item exits), if not return EEXIST
-    if (dst_path_return.errcode == 0 && dst_path_return.entry->file_type == EXT2_FT_DIR) {
-        return EISDIR;
-    }
-    else if (dst_path_return.errcode < 0) {
-        return ENOENT; 
-    }
-    else if (dst_path_return.errcode == 0) {
+    int dst_lock_dir;
+
+    // Check if the dest has errcode 1 (everything until final item exists), if not return EEXIST
+    if (dst_path_return.errcode == 0) {
+        pthread_mutex_unlock(&inode_locks[dst_path_return.entry->inode - 1]);
+        pthread_mutex_unlock(&inode_locks[dst_path_return.parent_inode]);
+        if (dst_path_return.entry->file_type == EXT2_FT_DIR) {
+            printf("ln_hl EISDIR\n");
+            return EISDIR;
+        }
+        printf("ln_hl EEXIST\n");
         return EEXIST;
     }
-    // Finally, add a new directory entry to the parent directory pointing to the inode, with the name.
-    int dest_parent_inode = (dst_path_return.entry != NULL) ? dst_path_return.entry->inode - 1 : 1;
-    struct ext2_inode* folder = resolve_inode_number(dest_parent_inode);
-    // temporarily allocate a name on the heap
-    char* name = calloc(strlen(dst_path_return.last_token) + 1, sizeof(char));
-    strcpy(name, dst_path_return.last_token);
-    char* trailing_slash = strchr(name, '/');
+    else if (dst_path_return.errcode < 0) {
+        printf("ln_hl ENOENT\n");
+        return ENOENT; 
+    }
+
+    dst_lock_dir = (dst_path_return.entry != NULL) ? dst_path_return.entry->inode - 1 : 1;
+
+    // Unlock the parent directory entry
+    pthread_mutex_unlock(&inode_locks[dst_lock_dir]);
+
+
+    // Lock the locks in order
+    lock_locks(src_lock_dir, src_lock_file, dst_lock_dir);
+
+
+    // Finally, regrab the three locks (src file, src parent, dst parent) with smallest first
+    struct ext2_inode* source_inode = resolve_inode_number(src_lock_file);
+    struct ext2_inode* source_dir = resolve_inode_number(src_lock_dir);
+    struct ext2_inode* dest_dir = resolve_inode_number(dst_lock_dir);
+
+    char* src_name = calloc(strlen(src_path_return.last_token) + 1, sizeof(char));
+    strcpy(src_name, src_path_return.last_token);
+    char* trailing_slash = strchr(src_name, '/');
     if (trailing_slash != NULL) {
         *trailing_slash = '\0';
     }
 
+    // temporarily allocate a name on the heap
+    char* dst_name = calloc(strlen(dst_path_return.last_token) + 1, sizeof(char));
+    strcpy(dst_name, dst_path_return.last_token);
+    trailing_slash = strchr(dst_name, '/');
+    if (trailing_slash != NULL) {
+        *trailing_slash = '\0';
+    }
 
-    struct ext2_dir_entry* hl = ex2_search_free_dir_entry(folder, name, source_inode_num);
-    free(name);
+    // Finally, since we freed our locks previously,
+    // we need to check that our files remain in a good state
+    // e2_find_dir_entry(source_dir)
+    struct ext2_dir_entry* new_src_entry = e2_find_dir_entry(source_dir, src_name, strlen(src_name));
+    struct ext2_dir_entry* new_dst_entry = e2_find_dir_entry(dest_dir, dst_name, strlen(dst_name));
+    free(src_name);
+    if (new_src_entry == NULL) {
+        unlock_locks(src_lock_dir, src_lock_file, dst_lock_dir);
+        free(dst_name);
+        printf("ln_hl ENOENT\n");
+        return ENOENT;
+    } else if (new_dst_entry != NULL) {
+        unlock_locks(src_lock_dir, src_lock_file, dst_lock_dir);
+        free(dst_name);
+        printf("ln_hl EEXIST\n");
+        return EEXIST;
+    }
+    // Update the src inode since it could change
+    src_lock_file = new_src_entry->inode - 1;
+    source_inode = resolve_inode_number(src_lock_file);
+
+
+    // Finally, add a new directory entry to the parent directory pointing to the inode, with the name.
+    struct ext2_inode* folder = resolve_inode_number(dst_lock_dir);
+
+    pthread_mutex_lock(&sb_lock);
+    pthread_mutex_lock(&gd_lock);
+
+    struct ext2_dir_entry* hl = ex2_search_free_dir_entry(folder, dst_name, src_lock_file);
+    pthread_mutex_unlock(&gd_lock);
+    pthread_mutex_unlock(&sb_lock);
+    free(dst_name);
+
     if (hl == NULL) {
+        unlock_locks(src_lock_dir, src_lock_file, dst_lock_dir);
+        printf("ln_hl ENOSPC\n");
         return ENOSPC;
     }
+
     // whoops, gotta actually fill the info out!!!
     hl->file_type = src_path_return.entry->file_type;
     // also, resolve the inode and increment the link count.
-    struct ext2_inode* source_inode = resolve_inode_number(source_inode_num);
     source_inode->i_links_count++;
+
+    unlock_locks(src_lock_dir, src_lock_file, dst_lock_dir);
 
     return 0;
 }
