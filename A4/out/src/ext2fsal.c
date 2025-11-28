@@ -92,6 +92,17 @@ void ext2_fsal_destroy()
     /**
      * TODO: Cleanup tasks, e.g., destroy synchronization primitives, munmap the image, etc.
      */
-    // TODO free the mmap of disk with munmap() (probably)
-    // Destroy every lock, how?
+    // Free each inode lock
+    for (int i = 0; i < 32; i++) {
+        destroy_lock(&inode_locks[i]);
+    }
+
+    // Free the superblock and group descriptor locks
+    destroy_lock(&sb_lock);
+    destroy_lock(&gd_lock);
+
+    // Unmap the image
+    munmap(disk, 128 * 1024);
+
+    // Woohoo!
 }

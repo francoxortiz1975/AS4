@@ -69,6 +69,20 @@ int init_lock(fair_mutex* mutex_lock) {
     return returncode;
 }
 
+void destroy_lock(fair_mutex* mutex_lock) {
+    // According to private Piazza post @498, we can ignore the EBUSY case
+    pthread_mutex_destroy(mutex_lock->mutex);
+    pthread_mutex_destroy(mutex_lock->inner_mutex);
+    pthread_cond_destroy(mutex_lock->cond);
+    // Free each node, if they exist
+    struct mutex_node* curr = mutex_lock->queue_head;
+    while (curr != NULL) {
+        struct mutex_node* prev = curr;
+        curr = curr->next;
+        free(prev);
+    }
+}
+
 void lock_lock(fair_mutex* mutex_lock) {
     pthread_mutex_lock(&(mutex_lock->inner_mutex));
     // add to the new thing

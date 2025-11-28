@@ -76,6 +76,7 @@ struct mutex_node {
 };
 
 int init_lock(fair_mutex* mutex_lock);
+void destroy_lock(fair_mutex* mutex_lock);
 void lock_lock(fair_mutex* mutex_lock);
 void unlock_lock(fair_mutex* mutex_lock);
 
