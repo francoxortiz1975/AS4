@@ -27,9 +27,9 @@ extern struct ext2_group_desc* gd;
 extern unsigned char* inode_table;
 extern struct ext2_inode* root_inode;
 
-extern pthread_mutex_t inode_locks[32];
-extern pthread_mutex_t sb_lock;
-extern pthread_mutex_t gd_lock;
+extern fair_mutex inode_locks[32];
+extern fair_mutex sb_lock;
+extern fair_mutex gd_lock;
 
 
 
@@ -56,21 +56,21 @@ int32_t ext2_fsal_mkdir(const char *path)
         // If it's a regular file, return ENOENT
         
         // Also unlock the parent directory
-        pthread_mutex_unlock(&inode_locks[path_return.parent_inode]);
+        unlock_lock(&inode_locks[path_return.parent_inode]);
 
         if (path_return.entry->file_type == EXT2_FT_REG_FILE) {
             // Unlock the inode
-            pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
+            unlock_lock(&inode_locks[path_return.entry->inode - 1]);
             printf("mkdir ENOENT\n");
             return ENOENT;
         } else if (path_return.entry->file_type == EXT2_FT_DIR) {
-            pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
+            unlock_lock(&inode_locks[path_return.entry->inode - 1]);
             printf("mkdir EEXIST\n");
             return EEXIST;
         } else {
             // TODO check what happens if it's a symlink
             fprintf(stderr, "ext2fsal_mkdir: Unknown what occurs if ending path element is a symlink\n");
-            pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
+            unlock_lock(&inode_locks[path_return.entry->inode - 1]);
             exit(1);
         }
 
@@ -102,9 +102,9 @@ int32_t ext2_fsal_mkdir(const char *path)
     struct ext2_dir_entry* newfile = e2_create_file_setup(path_return.entry, name, 1);
     free(name);
     if (newfile == NULL) {
-        pthread_mutex_unlock(&inode_locks[path_return.entry->inode - 1]);
-        pthread_mutex_unlock(&gd_lock);
-        pthread_mutex_unlock(&sb_lock);
+        unlock_lock(&inode_locks[path_return.entry->inode - 1]);
+        unlock_lock(&gd_lock);
+        unlock_lock(&sb_lock);
         printf("mkdir ENOSPC\n");
         return ENOSPC;
     }
@@ -124,8 +124,8 @@ int32_t ext2_fsal_mkdir(const char *path)
 
     gd->bg_used_dirs_count++;
 
-    pthread_mutex_unlock(&gd_lock);
-    pthread_mutex_unlock(&sb_lock);
+    unlock_lock(&gd_lock);
+    unlock_lock(&sb_lock);
 
     newinode->i_block[0] = blockno;
     newinode->i_blocks = 2;
@@ -145,10 +145,10 @@ int32_t ext2_fsal_mkdir(const char *path)
     // increment used_dirs_count in the superblock
 
     // free the new file lock
-    pthread_mutex_unlock(&inode_locks[newfile->inode - 1]);
+    unlock_lock(&inode_locks[newfile->inode - 1]);
     
     // free the parent directory lock
-    pthread_mutex_unlock(&inode_locks[inodenum]);
+    unlock_lock(&inode_locks[inodenum]);
 
 
 

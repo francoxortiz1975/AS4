@@ -19,9 +19,9 @@
 #include <string.h>
 #include <errno.h>
 
-extern pthread_mutex_t inode_locks[32];
-extern pthread_mutex_t sb_lock;
-extern pthread_mutex_t gd_lock;
+extern fair_mutex inode_locks[32];
+extern fair_mutex sb_lock;
+extern fair_mutex gd_lock;
 
 
 int32_t ext2_fsal_cp(const char *src,
@@ -49,21 +49,21 @@ int32_t ext2_fsal_cp(const char *src,
         if (dst_result.entry->file_type == EXT2_FT_DIR) {
             //COPY HERE
             returncode = copy_into_directory(dst_result.entry, src);
-            pthread_mutex_unlock(&inode_locks[parent_lock_num]);
-            pthread_mutex_unlock(&inode_locks[file_lock_num]);
+            unlock_lock(&inode_locks[parent_lock_num]);
+            unlock_lock(&inode_locks[file_lock_num]);
             return returncode;
         } else {
             // entry is FILE
             returncode = file_overwrite(dst_result.entry, src);
-            pthread_mutex_unlock(&inode_locks[parent_lock_num]);
-            pthread_mutex_unlock(&inode_locks[file_lock_num]);
+            unlock_lock(&inode_locks[parent_lock_num]);
+            unlock_lock(&inode_locks[file_lock_num]);
             return returncode;
         }
     }
     else if (dst_result.errcode == 1) {
         // if 1, father exists, 
         returncode = create_new_file(dst_result.entry, dst_result.last_token, src);    
-        pthread_mutex_unlock(&inode_locks[parent_lock_num]);
+        unlock_lock(&inode_locks[parent_lock_num]);
         return returncode;
     }
     else {

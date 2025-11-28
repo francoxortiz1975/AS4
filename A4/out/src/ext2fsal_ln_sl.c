@@ -42,8 +42,8 @@ int32_t ext2_fsal_ln_sl(const char *src,
     if (dst_path_return.errcode != 1) {
         if (dst_path_return.errcode == 0) {
             // unlock the file and parent directory
-            pthread_mutex_unlock(&inode_locks[dst_path_return.entry->inode - 1]);
-            pthread_mutex_unlock(&inode_locks[dst_path_return.parent_inode]);
+            unlock_lock(&inode_locks[dst_path_return.entry->inode - 1]);
+            unlock_lock(&inode_locks[dst_path_return.parent_inode]);
 
             if (dst_path_return.entry->file_type == EXT2_FT_DIR) {
                 printf("ln_sl EISDIR\n");
@@ -70,9 +70,9 @@ int32_t ext2_fsal_ln_sl(const char *src,
     struct ext2_dir_entry* newfile = e2_create_file_setup(dst_path_return.entry, name, iterations);
     free(name);
     if (newfile == NULL) {
-        pthread_mutex_unlock(&inode_locks[dst_path_return.entry->inode - 1]);
-        pthread_mutex_unlock(&gd_lock);
-        pthread_mutex_unlock(&sb_lock);
+        unlock_lock(&inode_locks[dst_path_return.entry->inode - 1]);
+        unlock_lock(&gd_lock);
+        unlock_lock(&sb_lock);
         printf("ln_sl ENOSPC\n");
         return ENOSPC;
     }
@@ -102,10 +102,10 @@ int32_t ext2_fsal_ln_sl(const char *src,
     }
 
     // Free the parent directory lock
-    pthread_mutex_unlock(&inode_locks[dst_path_return.parent_inode]);
+    unlock_lock(&inode_locks[dst_path_return.parent_inode]);
     // Free sb and gd locks
-    pthread_mutex_unlock(&gd_lock);
-    pthread_mutex_unlock(&sb_lock);
+    unlock_lock(&gd_lock);
+    unlock_lock(&sb_lock);
 
     return 0;
 }
