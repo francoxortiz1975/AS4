@@ -179,6 +179,8 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
     for (int i = 0; i < 12; i++) {
         int block_num = folder->i_block[i];
         
+        // Skip if block not allocated
+        if (block_num == 0) break;
 
         struct ext2_dir_entry* entry = (struct ext2_dir_entry*)(disk + (1024 * block_num));
         // Loop through the block
@@ -236,6 +238,58 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
  */
 void ex2_free_dir_entry(struct ext2_dir_entry* entry) {
     entry->inode = 0;
+}
+
+/**
+ * Remove a directory entry from its parent directory.
+ * This properly adjusts the rec_len of the previous entry.
+ */
+int remove_dir_entry_from_parent(struct ext2_inode* parent_inode, const char* entry_name) {
+    int name_len = strlen(entry_name);
+    
+    // Iterate through all blocks in the parent directory
+    for (int i = 0; i < 12; i++) {
+        int block_num = parent_inode->i_block[i];
+        if (block_num == 0) break;
+        
+        struct ext2_dir_entry* prev_entry = NULL;
+        struct ext2_dir_entry* current_entry = (struct ext2_dir_entry*)(disk + (1024 * block_num));
+        int offset = 0;
+        
+        // Iterate through entries in this block
+        while (offset < 1024 && offset < parent_inode->i_size - (i * 1024)) {
+            // Safety check FIRST - avoid infinite loop
+            if (current_entry->rec_len == 0) {
+                break;
+            }
+            
+            // Check if this is the entry we want to remove
+            if (current_entry->inode != 0 &&
+                current_entry->name_len == name_len &&
+                strncmp(current_entry->name, entry_name, name_len) == 0) {
+                
+                // Found the entry to remove
+                if (prev_entry != NULL) {
+                    // Adjust previous entry's rec_len to skip this one
+                    prev_entry->rec_len += current_entry->rec_len;
+                } else {
+                    // This is the first entry in the block
+                    // Set inode to 0 and adjust rec_len to next entry or end of block
+                    current_entry->inode = 0;
+                    // Keep rec_len pointing to next entry
+                }
+                
+                return 0;  // Success
+            }
+            
+            // Move to next entry
+            prev_entry = current_entry;
+            offset += current_entry->rec_len;
+            current_entry = (struct ext2_dir_entry*)((char*)current_entry + current_entry->rec_len);
+        }
+    }
+    
+    return -1;  // Entry not found
 }
 
 /**
@@ -373,7 +427,6 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
 
     }
     // Paths could end like /1/2/3 or /1/2/3/. 
-
     int len_last_string = strlen(previous_slash + 1);
     // If we have a path like /1/2/3, 3 will go here. (Or if "/")
     if (next_slash == NULL) {
@@ -387,7 +440,10 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
             return wrap;
         }
         else {
-            wrap.entry = current_dir_entry;
+            // File doesn't exist, but parent directory does - return parent info
+            // For root directory case, current_dir_entry will be NULL, but current_dir_inode is root
+            wrap.parent_inode = current_dir_inode;  // The parent directory inode
+            wrap.entry = current_dir_entry;         // May be NULL for root
             wrap.errcode = 1;
             wrap.last_token = previous_slash + 1;
             return wrap;
@@ -405,7 +461,8 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
             return wrap;
         } else {
             // This depends on the function but it's safer to return success and let them deal with it
-            wrap.entry = current_dir_entry;
+            wrap.parent_inode = current_dir_inode;  // The parent directory inode
+            wrap.entry = current_dir_entry;         // May be NULL for root
             wrap.errcode = 1;
             wrap.last_token = previous_slash + 1;
             return wrap;
@@ -496,10 +553,18 @@ void write_block_data(int block_num, char *data) {
 }
 
 int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
+    printf("DEBUG file_init: START, source_path='%s'\n", source_path);
+    printf("DEBUG file_init: file_entry=%p, file_entry->inode=%u\n", (void*)file_entry, file_entry->inode);
+    fflush(stdout);
+    
     //get file in read + binary op
     FILE *source = fopen(source_path, "rb");
 
-    if (!source) return -ENOENT;  // error if not source
+    if (!source) {
+        printf("DEBUG file_init: fopen failed\n");
+        fflush(stdout);
+        return -ENOENT;  // error if not source
+    }
 
     //get size, we move to the end of file
     fseek(source, 0, SEEK_END);
@@ -507,17 +572,35 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     //once we get size with ftell, go back
     rewind(source);
 
-    //extract the file inode in entry already
-    struct ext2_inode *file_inode = resolve_inode_number(file_entry->inode);
+    printf("DEBUG file_init: file_size=%d, resolving inode %u\n", file_size, file_entry->inode - 1);
+    fflush(stdout);
+
+    //extract the file inode in entry already (inode numbers are 1-based, array is 0-based)
+    struct ext2_inode *file_inode = resolve_inode_number(file_entry->inode - 1);
+    
+    printf("DEBUG file_init: file_inode=%p\n", (void*)file_inode);
+    fflush(stdout);
+    
+    // Set the directory entry file type to regular file
+    file_entry->file_type = EXT2_FT_REG_FILE;
 
     //compute how many blocks we need
     int blocks_needed = (file_size + 1023) / 1024;
+
+    printf("DEBUG file_init: blocks_needed=%d\n", blocks_needed);
+    fflush(stdout);
 
     //we can assume file is not to big to require more than 13 blocks, 12 direct and first indirect
     unsigned int *indirect_block = NULL;
 
     for (int i = 0; i < blocks_needed; i++) {
+        printf("DEBUG file_init: allocating block %d/%d\n", i+1, blocks_needed);
+        fflush(stdout);
+        
         int free_block = ex2_search_free_block_bitmap();
+        
+        printf("DEBUG file_init: got free_block=%d\n", free_block);
+        fflush(stdout);
 
         if (i < 12) {
             // Bloques directos (0-11)
@@ -567,6 +650,10 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     file_inode->i_blocks += 2;  // +1 bloque indirecto × 2 sectores
 }
     fclose(source);
+    
+    printf("DEBUG file_init: SUCCESS, returning 0\n");
+    fflush(stdout);
+    
     return 0;
 }
 
@@ -706,8 +793,8 @@ int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_pat
     int new_file_size = ftell(source);
     rewind(source);
     
-    //existing inode
-    struct ext2_inode *existing_inode = resolve_inode_number(existing_entry->inode);
+    //existing inode (inode numbers in entries are 1-based, resolve expects 0-based)
+    struct ext2_inode *existing_inode = resolve_inode_number(existing_entry->inode - 1);
     
     // compute blocks
     int old_blocks = existing_inode->i_blocks / 2;
@@ -758,8 +845,8 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
         filename = src; //use all filename, NO  /
     }
     
-    //get directory inode
-    struct ext2_inode *parent_inode = resolve_inode_number(dir_entry->inode);
+    //get directory inode (inode numbers in entries are 1-based, resolve expects 0-based)
+    struct ext2_inode *parent_inode = resolve_inode_number(dir_entry->inode - 1);
     
     //check if already exists 
     struct ext2_dir_entry *existing_file = e2_find_dir_entry(parent_inode, (char*)filename, strlen(filename));
@@ -821,4 +908,106 @@ int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, c
     
     //init helper
     return file_init(new_entry, src);
+}
+
+/**
+ * Create a new file in a directory specified by parent_inode instead of parent_entry.
+ * Used when we have the parent inode directly (e.g., when path walking to create a new file).
+ */
+int create_new_file_in_inode(struct ext2_inode *parent_inode, const char *filename, const char *src) {
+    printf("DEBUG create_new_file_in_inode: START\n");
+    printf("DEBUG: parent_inode=%p, filename='%s', src='%s'\n", (void*)parent_inode, filename, src);
+    fflush(stdout);
+    
+    // Open the source file to get its size
+    FILE *source = fopen(src, "rb");
+    if (!source) {
+        printf("DEBUG create_new_file_in_inode: fopen failed\n");
+        fflush(stdout);
+        return -ENOENT;
+    }
+    
+    fseek(source, 0, SEEK_END);
+    int file_size = ftell(source);
+    fclose(source);
+    
+    // Compute blocks needed
+    int blocks_needed = (file_size + 1023) / 1024;
+    
+    // Clean filename (remove trailing slash if present)
+    char clean_filename[256];
+    strncpy(clean_filename, filename, 255);
+    clean_filename[255] = '\0';
+    int len = strlen(clean_filename);
+    if (len > 0 && clean_filename[len-1] == '/') {
+        clean_filename[len-1] = '\0';
+    }
+    
+    // Use e2_create_file_setup which already handles everything correctly
+    // We need to find a directory entry for the parent inode first
+    // But since we only have the inode, we need to work directly with it
+    
+    // Actually, let's just call the existing helper that works with parent_inode directly
+    // by using ex2_search_free_dir_entry and then file_init
+    
+    printf("DEBUG: allocating inode...\n");
+    fflush(stdout);
+    
+    int inodeno = ex2_search_free_inode_bitmap();
+    if (inodeno == -1) {
+        printf("DEBUG: no free inodes!\n");
+        fflush(stdout);
+        return -ENOSPC;
+    }
+    
+    printf("DEBUG: got inodeno=%d\n", inodeno);
+    fflush(stdout);
+    
+    struct ext2_inode* new_inode = resolve_inode_number(inodeno);
+    
+    // Initialize the inode
+    new_inode->i_mode = 0;
+    new_inode->i_size = 0;
+    new_inode->i_dtime = 0;
+    new_inode->i_links_count = 1;
+    new_inode->i_uid = 0;
+    new_inode->i_gid = 0;
+    new_inode->i_flags = 0;
+    new_inode->osd1 = 0;
+    new_inode->i_generation = 0;
+    new_inode->i_file_acl = 0;
+    new_inode->i_dir_acl = 0;
+    new_inode->i_faddr = 0;
+    memset(new_inode->i_block, 0, 15 * sizeof(unsigned int));
+    memset(new_inode->extra, 0, 3 * sizeof(unsigned int));
+    
+    // Check if there are enough free blocks
+    int free_blocks = ex2_find_free_blocks_count();
+    if (free_blocks < blocks_needed) {
+        ex2_unmark_inode_bitmap(inodeno);
+        return -ENOSPC;
+    }
+    
+    // Add directory entry to parent_inode
+    printf("DEBUG: adding dir entry, clean_filename='%s'\n", clean_filename);
+    fflush(stdout);
+    
+    struct ext2_dir_entry* new_dir_entry = ex2_search_free_dir_entry(parent_inode, clean_filename, inodeno);
+    if (new_dir_entry == NULL) {
+        printf("DEBUG: ex2_search_free_dir_entry returned NULL\n");
+        fflush(stdout);
+        ex2_unmark_inode_bitmap(inodeno);
+        return -ENOSPC;
+    }
+    
+    printf("DEBUG: new_dir_entry=%p, calling file_init...\n", (void*)new_dir_entry);
+    fflush(stdout);
+    
+    // Initialize the file with content
+    int result = file_init(new_dir_entry, src);
+    
+    printf("DEBUG create_new_file_in_inode: file_init returned %d\n", result);
+    fflush(stdout);
+    
+    return result;
 }

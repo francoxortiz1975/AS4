@@ -40,17 +40,21 @@ void copy_to_file(struct ext2_inode *inode, FILE *source, int blocks_needed);
 int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_path);
 int file_exists(const char *filepath);
 int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, const char *src);
+int create_new_file_in_inode(struct ext2_inode *parent_inode, const char *filename, const char *src);
 int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src);
 void ex2_unmark_inode_bitmap(int index);
+int remove_dir_entry_from_parent(struct ext2_inode *parent_inode, const char *filename);
 
 
 // Structs for helper functions
 struct ex2_dir_wrapper {
     // Null on error
     struct ext2_dir_entry* entry;
+    // Parent directory inode (useful when errcode=1 and creating new files)
+    struct ext2_inode* parent_inode;
     // Negative if error
     // 0 if success
-    // 1 if last item doesn't exist but items before do (entry thus has the parent inode)
+    // 1 if last item doesn't exist but items before do (parent_inode has the parent directory)
     int errcode;
     // Pointer to the last token. Not allocated with malloc, uses the input path
     // May have a trailing slash

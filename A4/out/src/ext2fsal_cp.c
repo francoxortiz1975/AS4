@@ -28,31 +28,93 @@ int32_t ext2_fsal_cp(const char *src,
      * Arguments src and dst are the cp command arguments described in the handout.
      */
 
-     /* This is just to avoid compilation warnings, remove these 2 lines when you're done. */
-        //CHECK src if valid file
-    if (!file_exists(src)) return -ENOENT;
+    printf("=== DEBUG: Starting ext2_fsal_cp ===\n");
+    printf("DEBUG: src='%s'\n", src);
+    printf("DEBUG: dst='%s'\n", dst);
+    fflush(stdout);
+
+    // CHECK src if valid file
+    printf("DEBUG: Checking if source file exists...\n");
+    fflush(stdout);
     
-    //CHECK path with pathwalk helper
+    if (!file_exists(src)) {
+        printf("DEBUG: Source file does not exist, returning -ENOENT\n");
+        fflush(stdout);
+        return -ENOENT;
+    }
+    
+    printf("DEBUG: Source file exists, continuing...\n");
+    fflush(stdout);
+
+    // CHECK path with pathwalk helper
+    printf("DEBUG: Calling e2_path_walk_absolute with dst='%s'\n", dst);
+    fflush(stdout);
+    
     struct ex2_dir_wrapper dst_result = e2_path_walk_absolute(dst);
     
-    //IF 0, MEANS final entry exists
+    printf("DEBUG: e2_path_walk_absolute returned errcode=%d\n", dst_result.errcode);
+    fflush(stdout);
+
+    // IF 0, MEANS final entry exists
     if (dst_result.errcode == 0) {
-        //IF this entry is a FOLDER
+        printf("DEBUG: Destination exists (errcode=0)\n");
+        printf("DEBUG: Checking dst_result.entry pointer: %p\n", (void*)dst_result.entry);
+        fflush(stdout);
+        
+        if (dst_result.entry == NULL) {
+            printf("DEBUG: ERROR - dst_result.entry is NULL!\n");
+            fflush(stdout);
+            return -ENOENT;
+        }
+        
+        printf("DEBUG: dst_result.entry->file_type = %d\n", dst_result.entry->file_type);
+        printf("DEBUG: EXT2_FT_DIR constant = %d\n", EXT2_FT_DIR);
+        fflush(stdout);
+
+        // IF this entry is a FOLDER
         if (dst_result.entry->file_type == EXT2_FT_DIR) {
-            //COPY HERE
+            printf("DEBUG: Destination is a directory, calling copy_into_directory\n");
+            fflush(stdout);
             return copy_into_directory(dst_result.entry, src);
         } else {
-        //entry is FILE
+            printf("DEBUG: Destination is a file, calling file_overwrite\n");
+            fflush(stdout);
+            // entry is FILE
             return file_overwrite(dst_result.entry, src);
         }
     }
     else if (dst_result.errcode == 1) {
-    //if 1, father exists, 
-        return create_new_file(dst_result.entry, dst_result.last_token, src);
+    printf("DEBUG: Parent directory exists, creating new file (errcode=1)\n");
+    printf("DEBUG: dst_result.parent_inode pointer: %p\n", (void*)dst_result.parent_inode);
+    printf("DEBUG: dst_result.last_token: '%s'\n", dst_result.last_token ? dst_result.last_token : "NULL");
+    fflush(stdout);
+    
+    // Add safety check - now check parent_inode instead of entry
+    if (dst_result.parent_inode == NULL) {
+        printf("DEBUG: ERROR - Parent directory inode is NULL!\n");
+        fflush(stdout);
+        return -ENOENT;
+    }
+    
+    printf("DEBUG: About to call create_new_file_in_inode...\n");
+    fflush(stdout);
+    
+    // Need to call a version that takes inode directly, or modify create_new_file
+    int result = create_new_file_in_inode(dst_result.parent_inode, dst_result.last_token, src);
+    
+    printf("DEBUG: create_new_file_in_inode returned: %d\n", result);
+    fflush(stdout);
+    
+    return result;
     }
     else {
+        printf("DEBUG: Path walk failed with errcode=%d, returning -ENOENT\n", dst_result.errcode);
+        fflush(stdout);
         return -ENOENT;
     }
 
+    // This should never be reached
+    printf("DEBUG: ERROR - Reached end of function unexpectedly!\n");
+    fflush(stdout);
     return 0;
 }
