@@ -656,17 +656,21 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     unsigned int *indirect_block = NULL;
 
     for (int i = 0; i < blocks_needed; i++) {        
-        // Si llegamos al bloque 12, crear el bloque indirecto PRIMERO
+        int free_block = ex2_search_free_block_bitmap();
+        // TODO: What if there's no free space and it returns -1?
+
         if (i == 12) {
+            //create a block inode
             int indirect_block_num = ex2_search_free_block_bitmap();
             file_inode->i_block[12] = indirect_block_num;
+            //pointer to it in disk
             indirect_block = (unsigned int*)(disk + (indirect_block_num * 1024));
+            //clean the indirect block (1024 bytes)
             memset(indirect_block, 0, 1024);
         }
 
-        // Luego asignar el bloque de datos
         int free_block = ex2_search_free_block_bitmap();
-
+        
         if (i < 12) {
             // direct blocks (0-11)
             file_inode->i_block[i] = free_block;
