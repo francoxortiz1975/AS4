@@ -48,8 +48,7 @@ int32_t ext2_fsal_mkdir(const char *path)
     struct ex2_dir_wrapper path_return = e2_path_walk_absolute(path);
     unsigned int inodenum;
     // Make sure to free the dir_wrapper after use!
-    if (path_return.errcode < 0) {
-        printf("mkdir EEXIST\n");
+    if (path_return.errcode != 0 && path_return.errcode != 1) {
         return EEXIST;
     }
     else if (path_return.errcode == 0) { // This means the entry is an existing inode
@@ -61,17 +60,14 @@ int32_t ext2_fsal_mkdir(const char *path)
         if (path_return.entry->file_type == EXT2_FT_REG_FILE) {
             // Unlock the inode
             unlock_lock(&inode_locks[path_return.entry->inode - 1]);
-            printf("mkdir ENOENT\n");
             return ENOENT;
         } else if (path_return.entry->file_type == EXT2_FT_DIR) {
             unlock_lock(&inode_locks[path_return.entry->inode - 1]);
-            printf("mkdir EEXIST\n");
             return EEXIST;
         } else {
             // TODO check what happens if it's a symlink
-            fprintf(stderr, "ext2fsal_mkdir: Unknown what occurs if ending path element is a symlink\n");
             unlock_lock(&inode_locks[path_return.entry->inode - 1]);
-            exit(1);
+            return EEXIST;
         }
 
     } 
@@ -105,7 +101,6 @@ int32_t ext2_fsal_mkdir(const char *path)
         unlock_lock(&inode_locks[path_return.entry->inode - 1]);
         unlock_lock(&gd_lock);
         unlock_lock(&sb_lock);
-        printf("mkdir ENOSPC\n");
         return ENOSPC;
     }
     newfile->file_type = EXT2_FT_DIR;
@@ -134,8 +129,8 @@ int32_t ext2_fsal_mkdir(const char *path)
     // No checking for free space is needed.
     // (because these two entries will not take up 1024 bytes)
     // Write . and .. into it.
-    struct ext2_dir_entry* dot = ex2_search_free_dir_entry(newinode, ".", newfile->inode - 1);
-    struct ext2_dir_entry* dotdot = ex2_search_free_dir_entry(newinode, "..", inodenum);
+    struct ext2_dir_entry* dot = ex2_search_free_dir_entry(newinode, ".", newfile->inode - 1, NULL);
+    struct ext2_dir_entry* dotdot = ex2_search_free_dir_entry(newinode, "..", inodenum, NULL);
 
     dot->file_type = EXT2_FT_DIR;
     dotdot->file_type = EXT2_FT_DIR;

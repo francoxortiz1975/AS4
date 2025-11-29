@@ -72,21 +72,19 @@ int32_t ext2_fsal_ln_hl(const char *src,
     // what you need to do is get the inode of the source.
     // Check if the source has errcode 0 (source file exists), if not return ENOENT
     // Also, check if it's a directory
-    if (src_path_return.errcode < 0) {
-        printf("ln_hl ENOENT\n");
+    if (src_path_return.errcode != 0 && src_path_return.errcode != 1) {
         return ENOENT;
     }
-    src_lock_file = src_path_return.entry->inode - 1;
+    if (src_path_return.entry == NULL) src_lock_file = 1;
+    else src_lock_file = src_path_return.entry->inode - 1;
     if (src_path_return.errcode == 0 && src_path_return.entry->file_type == EXT2_FT_DIR) {
         unlock_lock(&inode_locks[src_lock_file]);
         unlock_lock(&inode_locks[src_lock_dir]);
-        printf("ln_hl EISDIR\n");
         return EISDIR;
     }
     else if (src_path_return.errcode == 1) {
         unlock_lock(&inode_locks[src_lock_file]);
         unlock_lock(&inode_locks[src_lock_dir]);
-        printf("ln_hl ENOENT\n");
         return ENOENT;
     }
     // Temporarily unlock the file and parent directory
@@ -103,14 +101,11 @@ int32_t ext2_fsal_ln_hl(const char *src,
         unlock_lock(&inode_locks[dst_path_return.entry->inode - 1]);
         unlock_lock(&inode_locks[dst_path_return.parent_inode]);
         if (dst_path_return.entry->file_type == EXT2_FT_DIR) {
-            printf("ln_hl EISDIR\n");
             return EISDIR;
         }
-        printf("ln_hl EEXIST\n");
         return EEXIST;
     }
-    else if (dst_path_return.errcode < 0) {
-        printf("ln_hl ENOENT\n");
+    else if (dst_path_return.errcode != 1) {
         return ENOENT; 
     }
 
@@ -147,18 +142,16 @@ int32_t ext2_fsal_ln_hl(const char *src,
     // Finally, since we freed our locks previously,
     // we need to check that our files remain in a good state
     // e2_find_dir_entry(source_dir)
-    struct ext2_dir_entry* new_src_entry = e2_find_dir_entry(source_dir, src_name, strlen(src_name));
-    struct ext2_dir_entry* new_dst_entry = e2_find_dir_entry(dest_dir, dst_name, strlen(dst_name));
+    struct ext2_dir_entry* new_src_entry = e2_find_dir_entry(source_dir, src_name, strlen(src_name), NULL);
+    struct ext2_dir_entry* new_dst_entry = e2_find_dir_entry(dest_dir, dst_name, strlen(dst_name), NULL);
     free(src_name);
     if (new_src_entry == NULL) {
         unlock_locks(src_lock_dir, src_lock_file, dst_lock_dir);
         free(dst_name);
-        printf("ln_hl ENOENT\n");
         return ENOENT;
     } else if (new_dst_entry != NULL) {
         unlock_locks(src_lock_dir, src_lock_file, dst_lock_dir);
         free(dst_name);
-        printf("ln_hl EEXIST\n");
         return EEXIST;
     }
     // Update the src inode since it could change
@@ -172,14 +165,13 @@ int32_t ext2_fsal_ln_hl(const char *src,
     lock_lock(&sb_lock);
     lock_lock(&gd_lock);
 
-    struct ext2_dir_entry* hl = ex2_search_free_dir_entry(folder, dst_name, src_lock_file);
+    struct ext2_dir_entry* hl = ex2_search_free_dir_entry(folder, dst_name, src_lock_file, NULL);
     unlock_lock(&gd_lock);
     unlock_lock(&sb_lock);
     free(dst_name);
 
     if (hl == NULL) {
         unlock_locks(src_lock_dir, src_lock_file, dst_lock_dir);
-        printf("ln_hl ENOSPC\n");
         return ENOSPC;
     }
 

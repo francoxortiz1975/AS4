@@ -46,15 +46,12 @@ int32_t ext2_fsal_ln_sl(const char *src,
             unlock_lock(&inode_locks[dst_path_return.parent_inode]);
 
             if (dst_path_return.entry->file_type == EXT2_FT_DIR) {
-                printf("ln_sl EISDIR\n");
                 return EISDIR;
             }
             else {
-                printf("ln_sl EEXIST\n");
                 return EEXIST;
             }
         }
-        printf("ln_sl ENOENT\n");
         return ENOENT;         
     }
 
@@ -73,7 +70,6 @@ int32_t ext2_fsal_ln_sl(const char *src,
         unlock_lock(&inode_locks[dst_path_return.entry->inode - 1]);
         unlock_lock(&gd_lock);
         unlock_lock(&sb_lock);
-        printf("ln_sl ENOSPC\n");
         return ENOSPC;
     }
     newfile->file_type = EXT2_FT_SYMLINK;
@@ -88,7 +84,6 @@ int32_t ext2_fsal_ln_sl(const char *src,
     for (int i = 0; i < iterations; i++) {
         // allocate a new data block
         // We can assume this will succeed because we checked for n free spots in e2_create_file_setup
-        // not exactly sure about the + 1...
         int blockno = ex2_search_free_block_bitmap();
         // resolve it and write the data into it
         // but also, truncate the file
@@ -103,6 +98,8 @@ int32_t ext2_fsal_ln_sl(const char *src,
 
     // Free the parent directory lock
     unlock_lock(&inode_locks[dst_path_return.parent_inode]);
+    // Free the symlink
+    unlock_lock(&inode_locks[newfile->inode - 1]);
     // Free sb and gd locks
     unlock_lock(&gd_lock);
     unlock_lock(&sb_lock);

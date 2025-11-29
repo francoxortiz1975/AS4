@@ -22,6 +22,7 @@
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
 
 
 // Global variables
@@ -71,9 +72,9 @@ int init_lock(fair_mutex* mutex_lock) {
 
 void destroy_lock(fair_mutex* mutex_lock) {
     // According to private Piazza post @498, we can ignore the EBUSY case
-    pthread_mutex_destroy(mutex_lock->mutex);
-    pthread_mutex_destroy(mutex_lock->inner_mutex);
-    pthread_cond_destroy(mutex_lock->cond);
+    pthread_mutex_destroy(&(mutex_lock->mutex));
+    pthread_mutex_destroy(&(mutex_lock->inner_mutex));
+    pthread_cond_destroy(&(mutex_lock->cond));
     // Free each node, if they exist
     struct mutex_node* curr = mutex_lock->queue_head;
     while (curr != NULL) {
@@ -142,7 +143,7 @@ int ex2_search_free_block_bitmap() {
     unsigned char* block_bitmap = (disk + (1024 * gd->bg_block_bitmap));
 
     // Check each byte
-    for (int i = 0; i < sb->s_inodes_count / 8; i++) {
+    for (int i = 0; i < sb->s_blocks_count / 8; i++) {
         char block_byte = *(block_bitmap + i);
         // Check each bit
         for (char j = 0; j < 8; j++) {
@@ -214,7 +215,7 @@ static int ex2_search_free_inode_bitmap() {
  * 
  * Lock Info: This assumes a write lock is held for the sb and gd.
  */
-static void ex2_unmark_inode_bitmap(int index) {
+void ex2_unmark_inode_bitmap(int index) {
 
     // Get the inode bitmap, table from the group descriptor
     unsigned char* inode_bitmap = (disk + (1024 * gd->bg_inode_bitmap));
@@ -241,11 +242,13 @@ static int align_4_bytes(int num) {
 
 /**
  * This helper function searches and allocates a free directory entry in a directory inode
+ * It also fills the prev_entry pointer with the entry prior to the returned entry (if prev_entry is non-NULL).
+ * It sets the prev_entry pointer to null if it is the first in a block other than the first block (the 2nd block, for example).
  * 
  * Lock Info: It expects that a write lock is held for the folder.
  * It also assumes the sb and gd locks are claimed (if there needs to be a new node)
  */
-struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char* name, unsigned int inode) {
+struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char* name, unsigned int inode, struct ext2_dir_entry** prev_entry) {
 
     int size_acc = 0;
     
@@ -268,6 +271,8 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
     for (int i = 0; i < 12; i++) {
         int block_num = folder->i_block[i];
         
+        // Skip if block not allocated
+        if (block_num == 0) break;
 
         struct ext2_dir_entry* entry;
         // Loop through the block
@@ -286,12 +291,15 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
             if (entry->rec_len - last_entry_actual_size >= new_entry_actual_size) {
                 char* next_block_boundary = (char*)entry + entry->rec_len;
                 entry->rec_len = last_entry_actual_size;
+                if (prev_entry != NULL) *prev_entry = entry;
                 new_entry = (struct ext2_dir_entry *)((char*)entry + entry->rec_len);
                 new_entry->rec_len = next_block_boundary - (char*)new_entry;
             } else {
+                if (prev_entry != NULL) *prev_entry = NULL;
+
                 // You have to allocate a new block first.
                 int new_block_no = ex2_search_free_block_bitmap();
-
+                
                 // TODO check to see if this is enough for error handling/propagation
                 if (new_block_no == -1) return NULL;
 
@@ -326,15 +334,24 @@ struct ext2_dir_entry* ex2_search_free_dir_entry(struct ext2_inode* folder, char
 }
 
 /**
- * This function frees a given directory entry.
+ * This function frees a given directory entry given the entry and its previous entry.
+ * If the previous entry is NULL, then it is the first entry in a block.
+ * 
+ * Lock Info: This assumes you hold the lock for the folder.
  */
-void ex2_free_dir_entry(struct ext2_dir_entry* entry) {
-    entry->inode = 0;
+void ex2_free_dir_entry(struct ext2_dir_entry* entry, struct ext2_dir_entry* prev_entry) {
+    if (prev_entry != NULL) {
+        prev_entry->rec_len += entry->rec_len;
+    } else {
+        entry->inode = 0;
+    }
 }
 
 /**
  * This function gets an inode number from the directory entry number and resolves
  * it into a pointer to an ext2_inode.
+ * 
+ * Lock Info: N/A
  */
 struct ext2_inode* resolve_inode_number(unsigned int inodeno) {
     // This is fine without a lock because the gd's bg_inode_table should not change 
@@ -344,11 +361,12 @@ struct ext2_inode* resolve_inode_number(unsigned int inodeno) {
 
 /**
  * This function attempts to find a directory entry given a current directory inode
- * and a name. If successful, it will return the entry. If not, it will return NULL.
+ * and a name. If successful, it will return the entry, and fill prev_entry with the previous entry (if prev_entry is non-NULL). 
+ * If not, it will return NULL, and the previous entry will not be filled.
  * 
- * Lock info: A read (or write) lock should be held on the directory before calling this function.
+ * Lock info: A lock should be held on the directory before calling this function.
  */
-struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* name, int name_length) {
+struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* name, int name_length, struct ext2_dir_entry** prev_entry) {
     if (name_length == 0) return NULL;
     if (directory->i_mode >> 12 != EXT2_S_IFDIR >> 12) {
         fprintf(stderr, "e2_find_dir_entry: This was not called with a directory inode!\n");
@@ -363,6 +381,7 @@ struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* nam
 
         // Iterate through the linked list of entries
         struct ext2_dir_entry* entry = (struct ext2_dir_entry*)(disk + (1024 * block_num));
+        struct ext2_dir_entry* prev = NULL;
         while (1) {
 
             // If the name matches
@@ -371,9 +390,11 @@ struct ext2_dir_entry* e2_find_dir_entry(struct ext2_inode* directory, char* nam
                 name_length == entry->name_len &&
                 strncmp(name, entry->name, name_length) == 0
             ) {
+                if (prev_entry != NULL) *prev_entry = prev;
                 return entry;
             }
 
+            prev = entry;
             // Go to the next entry
             entry = (struct ext2_dir_entry *)((char*)entry + entry->rec_len);
             // Break if at the end
@@ -438,7 +459,8 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
             // get a lock for this
             lock_lock(prev_lock);
             // try to see if it exists
-            struct ext2_dir_entry* found_entry = e2_find_dir_entry(root_inode, previous_slash + 1, strlen(previous_slash + 1));
+            struct ext2_dir_entry* prev_found_entry;
+            struct ext2_dir_entry* found_entry = e2_find_dir_entry(root_inode, previous_slash + 1, strlen(previous_slash + 1), &prev_found_entry);
             wrap.parent_inode = 1;
 
             if (found_entry != NULL) {
@@ -446,6 +468,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
                 lock_lock(&inode_locks[found_entry->inode - 1]);
     
                 wrap.entry = found_entry;
+                wrap.prev_entry = prev_found_entry;
                 wrap.errcode = 0;
                 wrap.last_token = previous_slash + 1;
             }
@@ -473,7 +496,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
         }
 
         // call e2_find_dir_entry
-        current_dir_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, token_length);
+        current_dir_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, token_length, NULL);
         // Check that the entry exists
         if (current_dir_entry == NULL) {
             wrap.errcode = ENOENT;
@@ -527,13 +550,15 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
     // If we have a path like /1/2/3, 3 will go here
     if (next_slash == NULL) {
         // Try to return the item if found.
-        struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, strlen(previous_slash + 1));
+        struct ext2_dir_entry* prev_entry;
+        struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, strlen(previous_slash + 1), &prev_entry);
         wrap.parent_inode = current_dir_entry->inode - 1;
 
         if (found_entry != NULL) {
             // If it exists, lock it
             lock_lock(&inode_locks[found_entry->inode - 1]);
             wrap.entry = found_entry;
+            wrap.prev_entry = prev_entry;
             wrap.errcode = 0;
             wrap.last_token = previous_slash + 1;
         }
@@ -548,13 +573,15 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
     // If we have a path like /1/2/3/, return the directory if it is one
     else {
         // Find the last item and check that it's a directory
-        struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, strlen(previous_slash + 1) - 1);
+        struct ext2_dir_entry* prev_entry;
+        struct ext2_dir_entry* found_entry = e2_find_dir_entry(current_dir_inode, previous_slash + 1, strlen(previous_slash + 1) - 1, &prev_entry);
         wrap.parent_inode = (current_dir_entry != NULL) ? current_dir_entry->inode - 1 : -1;
 
         if (found_entry != NULL && found_entry->file_type == 2) {
             // If it exists, lock it
             lock_lock(&inode_locks[found_entry->inode - 1]);
             wrap.entry = found_entry;
+            wrap.prev_entry = prev_entry;
             wrap.errcode = 0;
             wrap.last_token = previous_slash + 1;
             return wrap;
@@ -594,6 +621,32 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
         parent_inode = resolve_inode_number(parent->inode - 1);
     }
 
+    // Do NOT allocate data block(s) yet
+
+    // update the parent directory with the extra directory entry
+    // by going to the last spot in the linked list
+    struct ext2_dir_entry* prev_entry;
+    struct ext2_dir_entry* new_dir_entry = ex2_search_free_dir_entry(parent_inode, name, inodeno, &prev_entry);
+    // If there is no space for the new entry (if in a new block), undo inode mapping and return.
+    if (new_dir_entry == NULL) {
+        ex2_unmark_inode_bitmap(inodeno);
+
+        unlock_lock(&inode_locks[inodeno]);
+        return NULL;
+    }
+
+    // Check that there are enough free blocks in the system
+    int free_blocks = ex2_find_free_blocks_count();
+
+    // If there is no space left, undo the new inode mapping and dir entry and return
+    if (free_blocks < blocks_needed) {
+        ex2_unmark_inode_bitmap(inodeno);
+        ex2_free_dir_entry(new_dir_entry, prev_entry);
+        unlock_lock(&inode_locks[inodeno]);
+        return NULL;
+    }
+
+    
     // Initialize the inode (partially)
     // Obtain a write lock on the inode
     lock_lock(&inode_locks[inodeno]);
@@ -603,6 +656,9 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
     new_inode->i_mode = 0;
     new_inode->i_size = 0;
     new_inode->i_dtime = 0;
+
+    // Set creation time
+    new_inode->i_ctime = time(NULL);
 
     // Temporarily initialize i_block
     memset(new_inode->i_block, 0, 15 * sizeof(unsigned int));
@@ -622,30 +678,6 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
     // Set links_count to 1 because it creates a file in a directory
     new_inode->i_links_count = 1;
 
-    // Do NOT allocate data block(s) yet
-
-    // update the parent directory with the extra directory entry
-    // by going to the last spot in the linked list
-    struct ext2_dir_entry* new_dir_entry = ex2_search_free_dir_entry(parent_inode, name, inodeno);
-    // If there is no space for the new entry (if in a new block), undo inode mapping and return.
-    if (new_dir_entry == NULL) {
-        ex2_unmark_inode_bitmap(inodeno);
-
-        unlock_lock(&inode_locks[inodeno]);
-        return NULL;
-    }
-
-    // Check that there are enough free blocks in the system
-    int free_blocks = ex2_find_free_blocks_count();
-
-    // If there is no space left, undo the new inode mapping and dir entry and return
-    if (free_blocks < blocks_needed) {
-        ex2_unmark_inode_bitmap(inodeno);
-
-        ex2_free_dir_entry(new_dir_entry);
-        unlock_lock(&inode_locks[inodeno]);
-        return NULL;
-    }
 
     // superblock/group descriptors have been updated in helpers, so no work necessary here
     return new_dir_entry;
@@ -673,7 +705,7 @@ void write_block_data(int block_num, char *data) {
  * Lock Info: It assumes the sb and gd locks are claimed, and unlocks them.
  * It also expects a lock on the file_entry's inode, and releases it.
  */
-int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
+int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {    
     //get file in read + binary op
     FILE *source = fopen(source_path, "rb");
 
@@ -702,9 +734,9 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     //we can assume file is not to big to require more than 13 blocks, 12 direct and first indirect
     unsigned int *indirect_block = NULL;
 
-    for (int i = 0; i < blocks_needed; i++) {
+    for (int i = 0; i < blocks_needed; i++) {        
         int free_block = ex2_search_free_block_bitmap();
-
+        // TODO: What if there's no free space and it returns -1?
         if (i < 12) {
             // Bloques directos (0-11)
             file_inode->i_block[i] = free_block;
@@ -928,13 +960,17 @@ int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_pat
 
     lock_lock(&sb_lock);
     lock_lock(&gd_lock);
-
     //adjust if more blocks needed
     if (new_blocks_needed < old_blocks) {
         //free some blocks
         free_blocks(existing_inode, new_blocks_needed, old_blocks);
     }
     else if (new_blocks_needed > old_blocks) {
+        if (new_blocks_needed - old_blocks > ex2_find_free_blocks_count()) {
+            unlock_lock(&sb_lock);
+            unlock_lock(&gd_lock);
+            return ENOSPC;
+        }
         //assign more block
         assign_blocks(existing_inode, old_blocks, new_blocks_needed);
     }
@@ -957,7 +993,9 @@ int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_pat
     return 0;
 }
 
-
+/**
+ * Lock info: N/A
+ */
 int file_exists(const char *filepath) {
     FILE *file = fopen(filepath, "r");
     if (file) {
@@ -975,7 +1013,8 @@ int file_exists(const char *filepath) {
  */
 int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
     //GET Name of SRC
-    const char *filename = strrchr(src, '/');
+    // REVIEW: This should be regular strchr
+    const char *filename = strchr(src, '/');
     if (filename) {
         filename++; //skip /
     } else {
@@ -986,7 +1025,7 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
     struct ext2_inode *parent_inode = resolve_inode_number(dir_entry->inode - 1);
     
     //check if already exists 
-    struct ext2_dir_entry *existing_file = e2_find_dir_entry(parent_inode, (char*)filename, strlen(filename));
+    struct ext2_dir_entry *existing_file = e2_find_dir_entry(parent_inode, (char*)filename, strlen(filename), NULL);
     
     if (existing_file != NULL) {
         //if EXISTS, overwrite
@@ -1022,7 +1061,7 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
  * This helper creates a new file.
  * 
  * Lock Info: It expects a lock held on the parent_entry's inode.
- * It acquires a write lock for the new file.
+ * It acquires a lock for the new file and releases it.
  * It acquires and releases the sb and gd locks.
  */
 int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, const char *src) {
