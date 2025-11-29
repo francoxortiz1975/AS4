@@ -656,9 +656,7 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     unsigned int *indirect_block = NULL;
 
     for (int i = 0; i < blocks_needed; i++) {        
-        int free_block = ex2_search_free_block_bitmap();
         // TODO: What if there's no free space and it returns -1?
-
         if (i == 12) {
             //create a block inode
             int indirect_block_num = ex2_search_free_block_bitmap();
