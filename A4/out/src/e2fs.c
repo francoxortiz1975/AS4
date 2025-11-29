@@ -623,9 +623,11 @@ void write_block_data(int block_num, char *data) {
  * 
  * Lock Info: It assumes the sb and gd locks are claimed, and unlocks them.
  * It also expects a lock on the file_entry's inode, and releases it.
+ * input: dir_entry already created AND source_path.
+ *
  */
 int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {    
-    //get file in read + binary op
+    //get file in read + binary mode for ops.
     FILE *source = fopen(source_path, "rb");
 
     if (!source) {
@@ -654,27 +656,23 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     unsigned int *indirect_block = NULL;
 
     for (int i = 0; i < blocks_needed; i++) {        
+        // Si llegamos al bloque 12, crear el bloque indirecto PRIMERO
+        if (i == 12) {
+            int indirect_block_num = ex2_search_free_block_bitmap();
+            file_inode->i_block[12] = indirect_block_num;
+            indirect_block = (unsigned int*)(disk + (indirect_block_num * 1024));
+            memset(indirect_block, 0, 1024);
+        }
+
+        // Luego asignar el bloque de datos
         int free_block = ex2_search_free_block_bitmap();
-        // TODO: What if there's no free space and it returns -1?
+
         if (i < 12) {
-            // Bloques directos (0-11)
+            // direct blocks (0-11)
             file_inode->i_block[i] = free_block;
         } 
         else {
-            //case indirect block
-            if (i == 12) {
-                //create a block inode
-                int indirect_block_num = ex2_search_free_block_bitmap();
-                file_inode->i_block[12] = indirect_block_num;
-                
-                //pointer to it in disk
-                indirect_block = (unsigned int*)(disk + (indirect_block_num * 1024));
-                
-                //clean the indirect block (1024 bytes)
-                memset(indirect_block, 0, 1024);
-            }
-            
-            // Guardar número de bloque en el bloque indirecto
+            //case indirect block 
             indirect_block[i - 12] = free_block;
         }
 
@@ -684,12 +682,12 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
         //read from 1 to 1024 bytes from source and save it into buffer.
         size_t bytes_read = fread(buffer, 1, 1024, source);
 
-        //if last, fill with 0s.
+        //if last BLOCK, fill BUFFER with 0s.
         if (bytes_read < 1024) {
             memset(buffer + bytes_read, 0, 1024 - bytes_read);
         }
 
-        //normal blocks, sets of 1024 buffer
+        //Writes blocks in disk, sets of 1024 buffer
         write_block_data(free_block, buffer);
     }
     pthread_mutex_unlock(&sb_lock);
@@ -706,7 +704,7 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     file_inode->i_blocks = blocks_needed * 2;  //2 inodes of 512 bytes for 1 block of 1024
 
     if (blocks_needed > 12) {
-        file_inode->i_blocks += 2;  // +1 bloque indirecto × 2 sectores
+        file_inode->i_blocks += 2;  // +1 indirect block  × 2 
     }
     fclose(source);
     pthread_mutex_unlock(&inode_locks[file_entry->inode - 1]);
@@ -943,14 +941,14 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
     //get directory inode
     struct ext2_inode *parent_inode = resolve_inode_number(dir_entry->inode - 1);
     
-    //check if already exists 
+    //check if a file with that name already exists 
     struct ext2_dir_entry *existing_file = e2_find_dir_entry(parent_inode, (char*)filename, strlen(filename), NULL);
     
     if (existing_file != NULL) {
         //if EXISTS, overwrite
         return file_overwrite(existing_file, src);
     } else {
-        //DOESNT EXISTS, 
+        //DOESNT EXISTS, creat a new file
         //check file
         FILE *source = fopen(src, "rb");
         if (!source) return ENOENT;
@@ -961,10 +959,9 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
         fclose(source);
         
          //compute blocks needed
-
         int blocks_needed = (file_size + 1023) / 1024;
         
-        //setup helper
+        //setup helper, to create directory entry and inode
         struct ext2_dir_entry *new_entry = e2_create_file_setup(dir_entry, (char*)filename, blocks_needed);
         if (!new_entry) {
             pthread_mutex_unlock(&sb_lock);
