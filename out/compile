@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+cd src
+make
+cp libext2fsal.so ../bin
+cd ..
+cp img.bak/* img
