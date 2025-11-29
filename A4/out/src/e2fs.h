@@ -62,24 +62,4 @@ struct ex2_dir_wrapper {
     char* last_token;
 };
 
-// Lock and lock nodes
-typedef struct {
-    pthread_mutex_t mutex; // the actual lock
-    pthread_mutex_t inner_mutex; // protects the queue
-    pthread_cond_t cond; // condition variable
-    // first item in queue
-    struct mutex_node* queue_head;
-    // last
-    struct mutex_node* queue_tail;
-} fair_mutex;
-
-struct mutex_node {
-    struct mutex_node* next;
-};
-
-int init_lock(fair_mutex* mutex_lock);
-void destroy_lock(fair_mutex* mutex_lock);
-void lock_lock(fair_mutex* mutex_lock);
-void unlock_lock(fair_mutex* mutex_lock);
-
 #endif

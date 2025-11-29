@@ -20,38 +20,27 @@
 #include <string.h>
 #include <errno.h>
 
-// Global variables
-extern unsigned char* disk; 
-extern struct ext2_super_block *sb;
-extern struct ext2_group_desc* gd;
-extern unsigned char* inode_table;
-extern struct ext2_inode* root_inode;
-
-extern fair_mutex inode_locks[32];
-extern fair_mutex sb_lock;
-extern fair_mutex gd_lock;
-
 static void lock_locks(int src_lock_dir, int src_lock_file, int dst_lock_dir) {
     if (src_lock_dir < dst_lock_dir) {
-        lock_lock(&inode_locks[src_lock_dir]);
-        lock_lock(&inode_locks[src_lock_file]);
-        lock_lock(&inode_locks[dst_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_file]);
+        pthread_mutex_lock(&inode_locks[dst_lock_dir]);
     } else if (src_lock_dir > dst_lock_dir) {
-        lock_lock(&inode_locks[dst_lock_dir]);
-        lock_lock(&inode_locks[src_lock_dir]);
-        lock_lock(&inode_locks[src_lock_file]);
+        pthread_mutex_lock(&inode_locks[dst_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_file]);
     } else {
         // src_lock_dir == dst_lock_dir
-        lock_lock(&inode_locks[src_lock_dir]);
-        lock_lock(&inode_locks[src_lock_file]);
+        pthread_mutex_lock(&inode_locks[src_lock_dir]);
+        pthread_mutex_lock(&inode_locks[src_lock_file]);
     }
 }
 
 static void unlock_locks(int src_dir, int src_file, int dst_dir) {
-    unlock_lock(&inode_locks[src_dir]);
-    unlock_lock(&inode_locks[src_file]);
+    pthread_mutex_unlock(&inode_locks[src_dir]);
+    pthread_mutex_unlock(&inode_locks[src_file]);
     if (src_dir != dst_dir)
-    unlock_lock(&inode_locks[dst_dir]);
+    pthread_mutex_unlock(&inode_locks[dst_dir]);
 }
 
 int32_t ext2_fsal_ln_hl(const char *src,
@@ -78,18 +67,18 @@ int32_t ext2_fsal_ln_hl(const char *src,
     if (src_path_return.entry == NULL) src_lock_file = 1;
     else src_lock_file = src_path_return.entry->inode - 1;
     if (src_path_return.errcode == 0 && src_path_return.entry->file_type == EXT2_FT_DIR) {
-        unlock_lock(&inode_locks[src_lock_file]);
-        unlock_lock(&inode_locks[src_lock_dir]);
+        pthread_mutex_unlock(&inode_locks[src_lock_file]);
+        pthread_mutex_unlock(&inode_locks[src_lock_dir]);
         return EISDIR;
     }
     else if (src_path_return.errcode == 1) {
-        unlock_lock(&inode_locks[src_lock_file]);
-        unlock_lock(&inode_locks[src_lock_dir]);
+        pthread_mutex_unlock(&inode_locks[src_lock_file]);
+        pthread_mutex_unlock(&inode_locks[src_lock_dir]);
         return ENOENT;
     }
     // Temporarily unlock the file and parent directory
-    unlock_lock(&inode_locks[src_lock_file]);
-    unlock_lock(&inode_locks[src_lock_dir]);
+    pthread_mutex_unlock(&inode_locks[src_lock_file]);
+    pthread_mutex_unlock(&inode_locks[src_lock_dir]);
 
 
     // After, path walk to the destination
@@ -98,8 +87,8 @@ int32_t ext2_fsal_ln_hl(const char *src,
 
     // Check if the dest has errcode 1 (everything until final item exists), if not return EEXIST
     if (dst_path_return.errcode == 0) {
-        unlock_lock(&inode_locks[dst_path_return.entry->inode - 1]);
-        unlock_lock(&inode_locks[dst_path_return.parent_inode]);
+        pthread_mutex_unlock(&inode_locks[dst_path_return.entry->inode - 1]);
+        pthread_mutex_unlock(&inode_locks[dst_path_return.parent_inode]);
         if (dst_path_return.entry->file_type == EXT2_FT_DIR) {
             return EISDIR;
         }
@@ -112,7 +101,7 @@ int32_t ext2_fsal_ln_hl(const char *src,
     dst_lock_dir = (dst_path_return.entry != NULL) ? dst_path_return.entry->inode - 1 : 1;
 
     // Unlock the parent directory entry
-    unlock_lock(&inode_locks[dst_lock_dir]);
+    pthread_mutex_unlock(&inode_locks[dst_lock_dir]);
 
 
     // Lock the locks in order
@@ -162,12 +151,12 @@ int32_t ext2_fsal_ln_hl(const char *src,
     // Finally, add a new directory entry to the parent directory pointing to the inode, with the name.
     struct ext2_inode* folder = resolve_inode_number(dst_lock_dir);
 
-    lock_lock(&sb_lock);
-    lock_lock(&gd_lock);
+    pthread_mutex_lock(&sb_lock);
+    pthread_mutex_lock(&gd_lock);
 
     struct ext2_dir_entry* hl = ex2_search_free_dir_entry(folder, dst_name, src_lock_file, NULL);
-    unlock_lock(&gd_lock);
-    unlock_lock(&sb_lock);
+    pthread_mutex_unlock(&gd_lock);
+    pthread_mutex_unlock(&sb_lock);
     free(dst_name);
 
     if (hl == NULL) {

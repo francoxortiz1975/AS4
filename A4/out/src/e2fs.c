@@ -15,6 +15,7 @@
  * TODO: Make sure to add all necessary includes here
  */
 
+#include "ext2fsal.h"
 #include "e2fs.h"
 
 #include <stdio.h>
@@ -25,89 +26,7 @@
 #include <time.h>
 
 
-// Global variables
-extern unsigned char* disk; 
-extern struct ext2_super_block *sb;
-extern struct ext2_group_desc* gd;
-extern unsigned char* inode_table;
-extern struct ext2_inode* root_inode;
-
-extern fair_mutex inode_locks[32];
-//extern char reference_counts[32];
-extern fair_mutex sb_lock;
-extern fair_mutex gd_lock;
-
-
 static const int DIR_ENTRY_MIN_SIZE = 8;
-
-/**
- * Functions for interacting with fair locks.
- */
-static struct mutex_node* join_queue(fair_mutex* fair) {
-    struct mutex_node* whatever = calloc(sizeof(struct mutex_node), 1);
-    if (whatever == NULL) return NULL;
-    if (fair->queue_head == NULL) {
-        fair->queue_head = whatever;
-        fair->queue_tail = whatever;
-        return whatever;
-    }
-    fair->queue_tail->next = whatever;
-    fair->queue_tail = whatever;
-    return whatever;
-}
-static struct mutex_node* remove_queue(fair_mutex* fair) {
-    if (fair->queue_head == NULL) return NULL;
-    struct mutex_node* prev_head = fair->queue_head;
-    fair->queue_head = prev_head->next;
-    return prev_head;
-}
-
-int init_lock(fair_mutex* mutex_lock) {
-    int returncode = 0;
-    returncode |= pthread_mutex_init(&(mutex_lock->mutex), NULL);
-    returncode |= pthread_mutex_init(&(mutex_lock->inner_mutex), NULL);
-    returncode |= pthread_cond_init(&(mutex_lock->cond), NULL);
-    return returncode;
-}
-
-void destroy_lock(fair_mutex* mutex_lock) {
-    // According to private Piazza post @498, we can ignore the EBUSY case
-    pthread_mutex_destroy(&(mutex_lock->mutex));
-    pthread_mutex_destroy(&(mutex_lock->inner_mutex));
-    pthread_cond_destroy(&(mutex_lock->cond));
-    // Free each node, if they exist
-    struct mutex_node* curr = mutex_lock->queue_head;
-    while (curr != NULL) {
-        struct mutex_node* prev = curr;
-        curr = curr->next;
-        free(prev);
-    }
-}
-
-void lock_lock(fair_mutex* mutex_lock) {
-    pthread_mutex_lock(&(mutex_lock->inner_mutex));
-    // add to the new thing
-    struct mutex_node* position = join_queue(mutex_lock);
-    if (position == NULL) exit(1);
-
-    // Wait in line while you aren't at head position
-    while (mutex_lock->queue_head != position) {
-        pthread_cond_wait(&(mutex_lock->cond), &(mutex_lock->inner_mutex));
-    }
-    // Once you are at head position, remove yourself and signal the next one
-    free(remove_queue(mutex_lock));
-    pthread_cond_broadcast(&(mutex_lock->cond));
-
-    pthread_mutex_lock(&(mutex_lock->mutex));
-
-    // now you can do shit
-    // release the inner mutex
-    pthread_mutex_unlock(&(mutex_lock->inner_mutex));
-}
-
-void unlock_lock(fair_mutex* mutex_lock) {
-    pthread_mutex_unlock(&(mutex_lock->mutex));
-}
 
 /**
  * This helper function returns the number of free blocks on the drive.
@@ -440,8 +359,8 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
     char* next_slash = strchr(previous_slash + 1, '/');
     struct ext2_inode* current_dir_inode = root_inode;
     struct ext2_dir_entry* current_dir_entry = NULL;
-    fair_mutex* prev_lock = &inode_locks[1];
-    fair_mutex* new_lock = prev_lock;
+    pthread_mutex_t* prev_lock = &inode_locks[1];
+    pthread_mutex_t* new_lock = prev_lock;
 
     if (next_slash == NULL) {
         // It is the root directory
@@ -451,13 +370,13 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
             wrap.errcode = 0;
             wrap.last_token = previous_slash + 1;
 
-            lock_lock(prev_lock);
+            pthread_mutex_lock(prev_lock);
             return wrap;
         } 
         // It's in the root directory
         else {
             // get a lock for this
-            lock_lock(prev_lock);
+            pthread_mutex_lock(prev_lock);
             // try to see if it exists
             struct ext2_dir_entry* prev_found_entry;
             struct ext2_dir_entry* found_entry = e2_find_dir_entry(root_inode, previous_slash + 1, strlen(previous_slash + 1), &prev_found_entry);
@@ -465,7 +384,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
 
             if (found_entry != NULL) {
                 // Lock the found entry since it exists
-                lock_lock(&inode_locks[found_entry->inode - 1]);
+                pthread_mutex_lock(&inode_locks[found_entry->inode - 1]);
     
                 wrap.entry = found_entry;
                 wrap.prev_entry = prev_found_entry;
@@ -482,7 +401,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
         }
     }
     // Use a read or write lock depending on if the slash is the last or not
-    lock_lock(prev_lock);
+    pthread_mutex_lock(prev_lock);
 
     // While in this loop, all path items should be directories
     while (next_slash != NULL && *(next_slash + 1) != '\0') {
@@ -491,7 +410,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
         int token_length = next_slash - previous_slash - 1;
         if (token_length == 0) {
             wrap.errcode = EINVAL;
-            unlock_lock(prev_lock);
+            pthread_mutex_unlock(prev_lock);
             return wrap;
         }
 
@@ -500,15 +419,15 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
         // Check that the entry exists
         if (current_dir_entry == NULL) {
             wrap.errcode = ENOENT;
-            unlock_lock(prev_lock);
+            pthread_mutex_unlock(prev_lock);
             return wrap;
         }
 
         // now you have the new inode, lock it
         new_lock = &inode_locks[current_dir_entry->inode - 1];
-        lock_lock(new_lock);
+        pthread_mutex_lock(new_lock);
         // then, unlock the old inode
-        unlock_lock(prev_lock);
+        pthread_mutex_unlock(prev_lock);
         prev_lock = new_lock;
 
         current_dir_inode = resolve_inode_number(current_dir_entry->inode - 1);
@@ -536,7 +455,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
         // Check that it's the correct file type (directory)
         if (file_type != 'd') {
             wrap.errcode = ENOENT;
-            unlock_lock(prev_lock);
+            pthread_mutex_unlock(prev_lock);
             return wrap;
         }
 
@@ -556,7 +475,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
 
         if (found_entry != NULL) {
             // If it exists, lock it
-            lock_lock(&inode_locks[found_entry->inode - 1]);
+            pthread_mutex_lock(&inode_locks[found_entry->inode - 1]);
             wrap.entry = found_entry;
             wrap.prev_entry = prev_entry;
             wrap.errcode = 0;
@@ -579,7 +498,7 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
 
         if (found_entry != NULL && found_entry->file_type == 2) {
             // If it exists, lock it
-            lock_lock(&inode_locks[found_entry->inode - 1]);
+            pthread_mutex_lock(&inode_locks[found_entry->inode - 1]);
             wrap.entry = found_entry;
             wrap.prev_entry = prev_entry;
             wrap.errcode = 0;
@@ -606,8 +525,8 @@ struct ex2_dir_wrapper e2_path_walk_absolute(const char* path) {
  * Lastly, it acquires the sb and gd locks, which must be released after (Even if NULL).
  */
 struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char* name, int blocks_needed) {
-    lock_lock(&sb_lock);
-    lock_lock(&gd_lock);
+    pthread_mutex_lock(&sb_lock);
+    pthread_mutex_lock(&gd_lock);
 
     // Find/allocate a new inode for the file
     int inodeno = ex2_search_free_inode_bitmap();
@@ -631,7 +550,7 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
     if (new_dir_entry == NULL) {
         ex2_unmark_inode_bitmap(inodeno);
 
-        unlock_lock(&inode_locks[inodeno]);
+        pthread_mutex_unlock(&inode_locks[inodeno]);
         return NULL;
     }
 
@@ -642,14 +561,14 @@ struct ext2_dir_entry* e2_create_file_setup(struct ext2_dir_entry* parent, char*
     if (free_blocks < blocks_needed) {
         ex2_unmark_inode_bitmap(inodeno);
         ex2_free_dir_entry(new_dir_entry, prev_entry);
-        unlock_lock(&inode_locks[inodeno]);
+        pthread_mutex_unlock(&inode_locks[inodeno]);
         return NULL;
     }
 
     
     // Initialize the inode (partially)
     // Obtain a write lock on the inode
-    lock_lock(&inode_locks[inodeno]);
+    pthread_mutex_lock(&inode_locks[inodeno]);
 
 
     // Temporarily initialize i_mode, i_size, i_dtime
@@ -710,9 +629,9 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
     FILE *source = fopen(source_path, "rb");
 
     if (!source) {
-        unlock_lock(&sb_lock);
-        unlock_lock(&gd_lock);   
-        unlock_lock(&inode_locks[file_entry->inode - 1]); 
+        pthread_mutex_unlock(&sb_lock);
+        pthread_mutex_unlock(&gd_lock);   
+        pthread_mutex_unlock(&inode_locks[file_entry->inode - 1]); 
         return ENOENT;  // error if not source
     }
 
@@ -773,8 +692,8 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
         //normal blocks, sets of 1024 buffer
         write_block_data(free_block, buffer);
     }
-    unlock_lock(&sb_lock);
-    unlock_lock(&gd_lock);
+    pthread_mutex_unlock(&sb_lock);
+    pthread_mutex_unlock(&gd_lock);
 
      //type and permission update.
      //TYPE: REGULAR FILE, 
@@ -790,7 +709,7 @@ int file_init(struct ext2_dir_entry *file_entry, const char *source_path) {
         file_inode->i_blocks += 2;  // +1 bloque indirecto × 2 sectores
     }
     fclose(source);
-    unlock_lock(&inode_locks[file_entry->inode - 1]);
+    pthread_mutex_unlock(&inode_locks[file_entry->inode - 1]);
     return 0;
 }
 
@@ -958,8 +877,8 @@ int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_pat
     int old_blocks = existing_inode->i_blocks / 2;
     int new_blocks_needed = (new_file_size + 1023) / 1024;
 
-    lock_lock(&sb_lock);
-    lock_lock(&gd_lock);
+    pthread_mutex_lock(&sb_lock);
+    pthread_mutex_lock(&gd_lock);
     //adjust if more blocks needed
     if (new_blocks_needed < old_blocks) {
         //free some blocks
@@ -967,16 +886,16 @@ int file_overwrite(struct ext2_dir_entry *existing_entry, const char *source_pat
     }
     else if (new_blocks_needed > old_blocks) {
         if (new_blocks_needed - old_blocks > ex2_find_free_blocks_count()) {
-            unlock_lock(&sb_lock);
-            unlock_lock(&gd_lock);
+            pthread_mutex_unlock(&sb_lock);
+            pthread_mutex_unlock(&gd_lock);
             return ENOSPC;
         }
         //assign more block
         assign_blocks(existing_inode, old_blocks, new_blocks_needed);
     }
     
-    unlock_lock(&sb_lock);
-    unlock_lock(&gd_lock);
+    pthread_mutex_unlock(&sb_lock);
+    pthread_mutex_unlock(&gd_lock);
 
     //copy data
     copy_to_file(existing_inode, source, new_blocks_needed);
@@ -1048,8 +967,8 @@ int copy_into_directory(struct ext2_dir_entry *dir_entry, const char *src) {
         //setup helper
         struct ext2_dir_entry *new_entry = e2_create_file_setup(dir_entry, (char*)filename, blocks_needed);
         if (!new_entry) {
-            unlock_lock(&sb_lock);
-            unlock_lock(&gd_lock);    
+            pthread_mutex_unlock(&sb_lock);
+            pthread_mutex_unlock(&gd_lock);    
             return ENOSPC;
         }
         
@@ -1091,8 +1010,8 @@ int create_new_file(struct ext2_dir_entry *parent_entry, const char *filename, c
     //setup helper
     struct ext2_dir_entry *new_entry = e2_create_file_setup(parent_entry, clean_filename, blocks_needed);
     if (!new_entry) {
-        unlock_lock(&sb_lock);
-        unlock_lock(&gd_lock);
+        pthread_mutex_unlock(&sb_lock);
+        pthread_mutex_unlock(&gd_lock);
         return ENOSPC;
     }
     

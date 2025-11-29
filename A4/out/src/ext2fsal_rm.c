@@ -34,7 +34,7 @@ int32_t ext2_fsal_rm(const char *path){
     if (result.errcode != 0) {
         // If the parent dir existed, unlock it
         if (result.errcode == 1) {
-            unlock_lock(&inode_locks[result.parent_inode]);
+            pthread_mutex_unlock(&inode_locks[result.parent_inode]);
         }
         return ENOENT;
     }
@@ -45,8 +45,8 @@ int32_t ext2_fsal_rm(const char *path){
 
     // if directory, error
     if (result.entry->file_type == EXT2_FT_DIR) {
-        unlock_lock(&inode_locks[parent_lock_num]);
-        unlock_lock(&inode_locks[file_lock_num]);
+        pthread_mutex_unlock(&inode_locks[parent_lock_num]);
+        pthread_mutex_unlock(&inode_locks[file_lock_num]);
         return EISDIR;
     }
     
@@ -65,16 +65,16 @@ int32_t ext2_fsal_rm(const char *path){
         free_blocks(file_inode, 0, blocks_used);  // free all blocks
         
         //free inode (pass 0-based index)
-        lock_lock(&sb_lock);
-        lock_lock(&gd_lock);
+        pthread_mutex_lock(&sb_lock);
+        pthread_mutex_lock(&gd_lock);
         ex2_unmark_inode_bitmap(result.entry->inode - 1);
-        unlock_lock(&gd_lock);
-        unlock_lock(&sb_lock);
+        pthread_mutex_unlock(&gd_lock);
+        pthread_mutex_unlock(&sb_lock);
     }
 
     // Remove the directory entry
     ex2_free_dir_entry(result.entry, result.prev_entry);
-    unlock_lock(&inode_locks[parent_lock_num]);
-    unlock_lock(&inode_locks[file_lock_num]);
+    pthread_mutex_unlock(&inode_locks[parent_lock_num]);
+    pthread_mutex_unlock(&inode_locks[file_lock_num]);
     return 0;
 }
